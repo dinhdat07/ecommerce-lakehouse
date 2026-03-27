@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Environment
+.env
+
+# Data artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/sample/*.parquet
+data/sample/*.json
+data/sample/*.gz
+
+# Spark / local runtime
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoints/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
