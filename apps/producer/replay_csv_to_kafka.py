@@ -26,9 +26,30 @@ from common.runtime import build_run_id, ensure_directories, utc_now_iso
 logger = get_logger(__name__)
 
 
+def default_input_csv() -> str:
+    """Return the preferred default sample CSV path for replay.
+
+    Inputs:
+        None.
+
+    Outputs:
+        Path string for a sample CSV file that already exists in the repository
+        when possible, otherwise the generator-friendly default target.
+
+    Internal logic:
+        - Prefer the checked-in `events_sample_100k.csv` file for out-of-the-box runs.
+        - Fall back to `events_sample.csv` so generated local samples still work.
+    """
+
+    preferred = Path(SAMPLE_DATA_DIR) / "events_sample_100k.csv"
+    if preferred.exists():
+        return str(preferred)
+    return f"{SAMPLE_DATA_DIR}/events_sample.csv"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay CSV to Kafka topic.")
-    parser.add_argument("--input-csv", default=f"{SAMPLE_DATA_DIR}/events_sample.csv", help="CSV file path.")
+    parser.add_argument("--input-csv", default=default_input_csv(), help="CSV file path.")
     parser.add_argument("--bootstrap-servers", default=KAFKA_BOOTSTRAP_SERVERS, help="Kafka bootstrap servers.")
     parser.add_argument("--topic", default=KAFKA_TOPIC_EVENTS, help="Kafka topic.")
     return parser.parse_args()

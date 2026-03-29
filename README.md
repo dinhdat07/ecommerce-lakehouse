@@ -33,13 +33,24 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 ## Quick Start
 
 1. Copy `.env.example` to `.env`.
-2. Run the local batch flow:
+2. Bootstrap the local environment:
    ```bash
+   bash scripts/bootstrap_local.sh
+   ```
+3. Run the local batch flow:
+   ```bash
+   bash scripts/clean_local_state.sh
    bash scripts/run_local_batch.sh
    ```
-3. Run the streaming-friendly local replay flow:
+4. Run the streaming-friendly local replay flow:
    ```bash
+   bash scripts/clean_local_state.sh
    bash scripts/run_local_streaming.sh
+   ```
+5. Run automated verification:
+   ```bash
+   python3 scripts/verify_local.py
+   python3 -m pytest -q
    ```
 
 Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
@@ -48,5 +59,10 @@ Outputs are written under `data/lakehouse/` by default. Run metadata is stored i
 
 - `docs/architecture.md`: visible and hidden system architecture
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts
+- `docs/gap_analysis.md`: current implementation status and remaining gaps
+- `docs/local_setup.md`: local setup, sample data, and test commands
+- `docs/multi_node_readiness.md`: scaling path and shared-storage assumptions
+- `docs/deployment_3node_ubuntu.md`: step-by-step 3-node Ubuntu deployment guide
+- `docs/file_reference.md`: file roles and key classes/functions
 - `docs/system_map.md`: file responsibilities
 - `docs/improvements.md`: improvement and scaling recommendations

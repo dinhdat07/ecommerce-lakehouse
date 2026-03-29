@@ -8,6 +8,7 @@ configuration compatible with future Spark/Kafka execution.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -59,24 +60,22 @@ def main() -> None:
     staging_dir.mkdir(parents=True, exist_ok=True)
     csv_path = staging_dir / "local_bus_snapshot.csv"
 
-    rows: list[dict] = []
-    for jsonl_file in sorted(bus_dir.glob("*.jsonl")):
-        with jsonl_file.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                payload = json.loads(line)["payload"]
-                rows.append(payload)
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer: csv.DictWriter | None = None
+        row_count = 0
+        for jsonl_file in sorted(bus_dir.glob("*.jsonl")):
+            with jsonl_file.open("r", encoding="utf-8") as source_handle:
+                for line in source_handle:
+                    payload = json.loads(line)["payload"]
+                    if writer is None:
+                        writer = csv.DictWriter(handle, fieldnames=list(payload.keys()))
+                        writer.writeheader()
+                    writer.writerow(payload)
+                    row_count += 1
 
-    if not rows:
+    if row_count == 0:
         logger.info("No events available on the local replay bus.")
         return
-
-    fieldnames = list(rows[0].keys())
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        import csv
-
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
 
     result = run_bronze_backfill(config, input_dir=staging_dir, bronze_uri=args.bronze_path, source_type="local_bus")
     logger.info(

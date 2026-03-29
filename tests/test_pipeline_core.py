@@ -82,6 +82,9 @@ def test_batch_pipeline_round_trip_on_small_sample(tmp_path):
         bronze_uri=str(tmp_path / "bronze"),
         silver_uri=str(tmp_path / "silver"),
         gold_uri=str(tmp_path / "gold"),
+        local_data_root=tmp_path / "local_root",
+        manifest_root=tmp_path / "manifests",
+        checkpoint_root=tmp_path / "checkpoints",
     )
     bronze_result = run_bronze_backfill(config, input_dir=sample_dir)
     assert bronze_result.rows_written == 2

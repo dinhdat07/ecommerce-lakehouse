@@ -1,0 +1,2 @@
+pyspark>=3.5
+kafka-python>=2.0

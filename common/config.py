@@ -129,11 +129,16 @@ def load_config(
     bronze_uri: Optional[str] = None,
     silver_uri: Optional[str] = None,
     gold_uri: Optional[str] = None,
+    local_data_root: Optional[str | Path] = None,
+    manifest_root: Optional[str | Path] = None,
+    checkpoint_root: Optional[str | Path] = None,
 ) -> AppConfig:
     """Build the application configuration from repository defaults.
 
     Inputs:
         bronze_uri/silver_uri/gold_uri: Optional CLI overrides for logical stage URIs.
+        local_data_root/manifest_root/checkpoint_root: Optional overrides for
+            local execution roots used by tests, temporary runs, or alternate environments.
 
     Outputs:
         Fully populated `AppConfig`.
@@ -142,9 +147,9 @@ def load_config(
         Called from CLI entrypoints so stage jobs inherit the same runtime contract.
     """
 
-    local_data_root = Path(LOCAL_DATA_ROOT)
-    manifest_root = Path(MANIFEST_ROOT)
-    checkpoint_root = Path(CHECKPOINT_ROOT)
+    resolved_local_data_root = Path(local_data_root) if local_data_root is not None else Path(LOCAL_DATA_ROOT)
+    resolved_manifest_root = Path(manifest_root) if manifest_root is not None else Path(MANIFEST_ROOT)
+    resolved_checkpoint_root = Path(checkpoint_root) if checkpoint_root is not None else Path(CHECKPOINT_ROOT)
 
     return AppConfig(
         environment=ENV,
@@ -154,9 +159,9 @@ def load_config(
         bronze_uri=bronze_uri or BRONZE_PATH,
         silver_uri=silver_uri or SILVER_PATH,
         gold_uri=gold_uri or GOLD_PATH,
-        local_data_root=local_data_root,
-        manifest_root=manifest_root,
-        checkpoint_root=checkpoint_root,
+        local_data_root=resolved_local_data_root,
+        manifest_root=resolved_manifest_root,
+        checkpoint_root=resolved_checkpoint_root,
         kafka_bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
         kafka_topic_events=KAFKA_TOPIC_EVENTS,
         kafka_topic_dlq=KAFKA_TOPIC_DLQ,
