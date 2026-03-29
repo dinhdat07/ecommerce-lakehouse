@@ -1,0 +1,1 @@
+"""Gold-stage aggregation implementations."""

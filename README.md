@@ -1,52 +1,52 @@
 # ecommerce-lakehouse
 
-Production-inspired Data Engineering scaffold for real-time and historical E-commerce behavior analytics.
+Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver, and Gold data contracts.
 
-## Scope
+## Current Implementation
 
-This repository is a starter skeleton for:
-- Historical backfill from monthly `.csv.gz` files (Oct 2019 to Apr 2020)
-- Streaming simulation for newer events
-- Bronze / Silver / Gold data model
-- Local-first development with small sample data
+- Historical ingestion from CSV and CSV.GZ into append-only Bronze JSONL
+- Canonical Silver transformation with validation, normalization, and quarantine handling
+- Gold analytics outputs for user, product, funnel, category, and session metrics
+- Streaming-friendly local replay bus that mirrors the future Kafka path
+- Run manifests, serving SQL, and architecture/operator documentation
 
-## Planned Stack
+## Target Platform
 
-- Kafka: event ingestion
-- Spark: batch and structured streaming jobs
-- MinIO: S3-compatible object storage
-- Iceberg: table format for Silver/Gold
-- Trino: SQL query engine
-- Superset: dashboards
+- Kafka for durable event ingestion
+- Spark for batch and structured streaming execution
+- MinIO for S3-compatible storage
+- Iceberg for managed Silver and Gold tables
+- Trino for SQL serving
+- Superset for BI dashboards
 
 ## Repository Layout
 
-- `docs/`: project definition, architecture, and pipeline design notes
-- `data/raw/`: large source files (local/server mounted, generally not committed)
-- `data/sample/`: tiny sample data for local development
-- `configs/`: environment and runtime config files
-- `scripts/`: helper scripts for local setup and job execution
-- `apps/producer/`: Kafka producer/replay app
-- `apps/batch/`: Spark batch pipeline entrypoints
-- `apps/streaming/`: Spark structured streaming entrypoints
-- `apps/sql/`: SQL assets for Trino/Spark SQL
-- `common/`: reusable schema, transforms, constants, and logging
-- `tests/`: unit tests for shared logic
+- `apps/`: batch, streaming, producer, and SQL entrypoints
+- `common/`: shared config, quality, manifests, storage, schemas, and transforms
+- `pipelines/`: reusable Bronze, Silver, and Gold stage implementations
+- `data/raw/`: historical source files
+- `data/sample/`: local sample inputs
+- `docs/`: architecture, pipeline, system map, and improvement notes
+- `infra/`: future integrated platform bootstrap assets
+- `tests/`: unit and pipeline-focused tests
 
-## Quick Start (Local Skeleton)
+## Quick Start
 
-1. Copy `.env.example` to `.env` and update values.
-2. Generate sample input:
-   ```bash
-   python scripts/create_sample.py
-   ```
-3. Run local batch placeholders:
+1. Copy `.env.example` to `.env`.
+2. Run the local batch flow:
    ```bash
    bash scripts/run_local_batch.sh
    ```
+3. Run the streaming-friendly local replay flow:
+   ```bash
+   bash scripts/run_local_streaming.sh
+   ```
 
-## Notes
+Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
 
-- This scaffold intentionally omits full business logic.
-- Integration details for Kafka/Spark/MinIO/Iceberg are marked with TODOs.
-- Keep config externalized through environment variables and files under `configs/`.
+## Key Documentation
+
+- `docs/architecture.md`: visible and hidden system architecture
+- `docs/pipeline.md`: Bronze, Silver, Gold contracts
+- `docs/system_map.md`: file responsibilities
+- `docs/improvements.md`: improvement and scaling recommendations

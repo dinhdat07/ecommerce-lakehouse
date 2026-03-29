@@ -15,15 +15,21 @@ data/raw/*
 data/sample/*.parquet
 data/sample/*.json
 data/sample/*.gz
+data/lakehouse/
+data/manifests/
 
 # Spark / local runtime
 spark-warehouse/
 metastore_db/
 derby.log
 checkpoints/
+logs/
 
 # OS / editors
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+
+AGENTS.md

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-lakehouse"
+version = "0.1.0"
+description = "Hybrid local-first e-commerce lakehouse with batch and streaming-friendly pipelines."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Repository Contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+platform = ["pyspark>=3.5", "kafka-python>=2.0"]
+
+[tool.setuptools.packages.find]
+include = ["common*", "pipelines*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

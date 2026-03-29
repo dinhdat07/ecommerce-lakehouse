@@ -1,11 +1,24 @@
-"""Structured streaming job: Silver canonical events -> Gold aggregates."""
+"""Streaming-friendly Silver-to-Gold entrypoint.
+
+The current implementation computes deterministic micro-batch Gold tables from
+the locally materialized Silver layer, while preserving the CLI shape needed
+for a later Spark structured streaming upgrade.
+"""
 
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from common.config import load_config
 from common.constants import GOLD_PATH, SILVER_PATH, SPARK_APP_NAME_PREFIX, SPARK_MASTER
 from common.logger import get_logger
+from pipelines.gold.aggregate import run_silver_to_gold
 
 logger = get_logger(__name__)
 
@@ -18,6 +31,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_spark_session():
+    """Create a Spark session when PySpark is available."""
+
     from pyspark.sql import SparkSession
 
     return (
@@ -28,10 +43,23 @@ def build_spark_session():
 
 
 def main() -> None:
+    """Aggregate Silver partitions into Gold outputs using the shared core."""
+
     args = parse_args()
     logger.info("Starting silver_to_gold_stream silver=%s gold=%s", args.silver_path, args.gold_path)
-    logger.info("TODO: Define windowed aggregations for BI-ready metrics.")
-    logger.info("TODO: Upsert/append Gold tables with watermark strategy.")
+    config = load_config(silver_uri=args.silver_path, gold_uri=args.gold_path)
+    result = run_silver_to_gold(
+        config,
+        silver_root=Path(args.silver_path) if "://" not in args.silver_path else None,
+        gold_root=Path(args.gold_path) if "://" not in args.gold_path else None,
+    )
+    logger.info(
+        "Streaming-friendly Gold aggregation finished run_id=%s rows_read=%s tables_written=%s manifest=%s",
+        result.run_id,
+        result.rows_read,
+        len(result.output_paths),
+        result.manifest_path,
+    )
 
 
 if __name__ == "__main__":

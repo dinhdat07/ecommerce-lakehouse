@@ -1,11 +1,19 @@
-"""Transform Bronze raw events into typed Silver canonical events."""
+"""CLI entrypoint for Bronze-to-Silver canonicalization."""
 
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from common.config import load_config
 from common.constants import BRONZE_PATH, SILVER_PATH
 from common.logger import get_logger
+from pipelines.silver.transform import run_bronze_to_silver
 
 logger = get_logger(__name__)
 
@@ -18,10 +26,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the Silver transformation and log key quality metrics."""
+
     args = parse_args()
     logger.info("Starting bronze_to_silver with bronze=%s silver=%s", args.bronze_path, args.silver_path)
-    logger.info("TODO: Read Bronze dataset with Spark.")
-    logger.info("TODO: Apply canonical typing/cleaning and write Silver Iceberg table.")
+    config = load_config(bronze_uri=args.bronze_path, silver_uri=args.silver_path)
+    result = run_bronze_to_silver(
+        config,
+        bronze_root=Path(args.bronze_path) if "://" not in args.bronze_path else None,
+        silver_root=Path(args.silver_path) if "://" not in args.silver_path else None,
+    )
+    logger.info(
+        "Silver transform finished run_id=%s valid_rows=%s invalid_rows=%s duplicate_rows=%s manifest=%s",
+        result.run_id,
+        result.valid_rows,
+        result.invalid_rows,
+        result.duplicate_rows,
+        result.manifest_path,
+    )
 
 
 if __name__ == "__main__":

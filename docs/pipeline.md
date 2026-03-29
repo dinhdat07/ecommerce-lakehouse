@@ -1,36 +1,36 @@
-# Pipeline Design (Skeleton)
+# Pipeline Design
 
 ## Bronze
 
-- Input: CSV replay to Kafka and/or direct raw historical files
-- Output: append-only raw events with minimal mutation
-- Purpose: traceability and replay
+- Inputs: raw monthly CSV or CSV.GZ files, plus replayed streaming events.
+- Output contract: append-only JSONL with `payload`, `record_hash`, `source_file`, `source_row_number`, `source_type`, `run_id`, and `ingested_at`.
+- Purpose: replay, auditability, and a stable ingestion boundary.
 
 ## Silver
 
-- Input: Bronze events
-- Processing:
-  - parse timestamps
-  - cast numeric/string fields
-  - enforce required columns
-  - basic deduplication strategy (TBD)
-- Output: canonical typed events, partitioned by event date
+- Input: Bronze JSONL records.
+- Processing rules:
+  - parse both ISO sample timestamps and historical `YYYY-MM-DD HH:MM:SS UTC` timestamps
+  - normalize `event_type`, `brand`, and empty-string nullable fields
+  - cast numeric identifiers and prices
+  - validate required canonical columns
+  - deduplicate on a deterministic event identity hash
+- Outputs:
+  - canonical event partitions under `event_date=YYYY-MM-DD/`
+  - `_quarantine/` for invalid rows
 
 ## Gold
 
-- Input: Silver canonical events
-- Processing:
-  - aggregate behavior metrics (e.g., views, carts, purchases)
-  - compute user/product/category summaries
-- Output: BI-friendly tables for Trino/Superset
+- Input: Silver canonical events.
+- Outputs:
+  - `user_activity_summary`
+  - `product_popularity`
+  - `conversion_funnel`
+  - `revenue_by_category`
+  - `session_summary`
 
-## Workloads
+## Operational Layer
 
-- Batch jobs:
-  - `backfill_bronze.py`
-  - `bronze_to_silver.py`
-  - `silver_to_gold.py`
-- Streaming jobs:
-  - `kafka_to_bronze.py`
-  - `bronze_to_silver_stream.py`
-  - `silver_to_gold_stream.py`
+- Every stage writes a JSON manifest with row counts, inputs, outputs, and run metadata.
+- Batch and streaming-friendly entrypoints share the same business logic so the contracts stay aligned.
+- Local runs materialize logical `s3a://...` stage URIs under `data/lakehouse/`, keeping the codebase cloud-portable.
