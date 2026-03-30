@@ -1,7 +1,21 @@
-version: "3.9"
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging: *default-logging
+  networks:
+    - lakehouse
+  security_opt:
+    - no-new-privileges:true
 
 services:
   minio:
+    <<: *service-defaults
+    profiles: ["core", "extended"]
     image: minio/minio:RELEASE.2025-02-18T16-25-55Z
     command: server /data --console-address ":9001"
     environment:
@@ -10,29 +24,268 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    volumes:
+      - minio_data:/data
+    cpus: 0.75
+    mem_limit: 768m
+
+  minio-init:
+    <<: *service-defaults
+    profiles: ["core", "extended"]
+    image: minio/mc:RELEASE.2025-02-21T16-00-46Z
+    depends_on:
+      - minio
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        until mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null 2>&1; do
+          sleep 2
+        done
+        mc mb --ignore-existing local/bronze
+        mc mb --ignore-existing local/silver
+        mc mb --ignore-existing local/gold
+        mc mb --ignore-existing local/warehouse
+        echo "MinIO buckets ready."
+    cpus: 0.25
+    mem_limit: 128m
 
   kafka:
-    image: bitnami/kafka:3.8
+    <<: *service-defaults
+    profiles: ["core", "extended"]
+    image: apache/kafka:3.9.0
     environment:
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_CFG_PROCESS_ROLES: broker,controller
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_CFG_LOG_DIRS: /bitnami/kafka/data
-      KAFKA_KRAFT_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_RETENTION_HOURS: 12
+      KAFKA_LOG_RETENTION_BYTES: 536870912
+      KAFKA_LOG_SEGMENT_BYTES: 134217728
+      KAFKA_MESSAGE_MAX_BYTES: 2097152
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
       - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    cpus: 1.00
+    mem_limit: 1024m
+
+  kafka-init:
+    <<: *service-defaults
+    profiles: ["core", "extended"]
+    image: apache/kafka:3.9.0
+    depends_on:
+      - kafka
+    restart: "no"
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list >/dev/null 2>&1; do
+          sleep 2
+        done
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic ecom.events \
+          --partitions 2 \
+          --replication-factor 1 \
+          --config retention.ms=43200000 \
+          --config retention.bytes=268435456
+        echo "Kafka topic ready."
+    cpus: 0.25
+    mem_limit: 256m
+
+  spark-master:
+    <<: *service-defaults
+    profiles: ["core", "extended"]
+    image: apache/spark:3.5.1
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "7077:7077"
+      - "8081:8080"
+    volumes:
+      - spark_events:/opt/spark/events
+      - spark_master_data:/opt/spark/work-dir
+      - ../data/sample:/workspace/data/sample:ro
+      - ../infra/jobs:/workspace/jobs:ro
+    cpus: 0.75
+    mem_limit: 768m
+
+  spark-worker-1:
+    <<: *service-defaults
+    profiles: ["core", "extended"]
+    image: apache/spark:3.5.1
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - --webui-port
+      - "8081"
+      - --cores
+      - "1"
+      - --memory
+      - 1536m
+      - spark://spark-master:7077
+    ports:
+      - "8082:8081"
+    volumes:
+      - spark_worker1_data:/opt/spark/work-dir
+      - ../data/sample:/workspace/data/sample:ro
+    tmpfs:
+      - /tmp:size=256m
+    cpus: 1.25
+    mem_limit: 1792m
+
+  spark-worker-2:
+    <<: *service-defaults
+    profiles: ["extended"]
+    image: apache/spark:3.5.1
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - --webui-port
+      - "8081"
+      - --cores
+      - "1"
+      - --memory
+      - 1024m
+      - spark://spark-master:7077
+    ports:
+      - "8083:8081"
+    volumes:
+      - spark_worker2_data:/opt/spark/work-dir
+      - ../data/sample:/workspace/data/sample:ro
+    tmpfs:
+      - /tmp:size=256m
+    cpus: 1.00
+    mem_limit: 1280m
+
+  postgres:
+    <<: *service-defaults
+    profiles: ["serving", "bi"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    cpus: 0.50
+    mem_limit: 512m
 
   trino:
-    image: trinodb/trino:462
+    <<: *service-defaults
+    profiles: ["serving", "bi"]
+    image: trinodb/trino:480
+    depends_on:
+      - minio
+      - postgres
     ports:
       - "8080:8080"
+    volumes:
+      - ./trino/etc:/etc/trino:ro
+    cpus: 1.00
+    mem_limit: 1536m
 
   superset:
-    image: apache/superset:4.1.1
+    <<: *service-defaults
+    profiles: ["bi"]
+    image: apache/superset:4.1.2
+    depends_on:
+      - postgres
+      - trino
+      - superset-init
+    environment:
+      SUPERSET_SECRET_KEY: changeme-insecure-dev-key
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_LOAD_EXAMPLES: "no"
+      PYTHONPATH: /app/pythonpath
     ports:
       - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/pythonpath:/app/pythonpath:ro
+      - ./superset/bootstrap:/app/bootstrap:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pip install --no-cache-dir trino sqlalchemy-trino psycopg2-binary >/tmp/superset-pip.log 2>&1
+        superset run -h 0.0.0.0 -p 8088 --with-threads
+    cpus: 1.00
+    mem_limit: 1536m
+
+  superset-init:
+    <<: *service-defaults
+    profiles: ["bi"]
+    image: apache/superset:4.1.2
+    depends_on:
+      - postgres
+      - trino
+    restart: "no"
+    environment:
+      SUPERSET_SECRET_KEY: changeme-insecure-dev-key
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_LOAD_EXAMPLES: "no"
+      PYTHONPATH: /app/pythonpath
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/pythonpath:/app/pythonpath:ro
+      - ./superset/bootstrap:/app/bootstrap:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pip install --no-cache-dir trino sqlalchemy-trino psycopg2-binary >/tmp/superset-pip.log 2>&1
+        superset db upgrade
+        superset fab create-admin \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --email admin@example.com \
+          --password admin || true
+        superset init
+        python /app/bootstrap/bootstrap_superset.py
+        echo "Superset bootstrap complete."
+
+networks:
+  lakehouse:
+    name: "${COMPOSE_PROJECT_NAME:-ecommerce-lakehouse-laptop}"
+
+volumes:
+  minio_data:
+  kafka_data:
+  spark_events:
+  spark_master_data:
+  spark_worker1_data:
+  spark_worker2_data:
+  postgres_data:
+  superset_home:

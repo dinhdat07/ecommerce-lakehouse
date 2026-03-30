@@ -1,0 +1,8 @@
+CREATE USER iceberg WITH PASSWORD 'iceberg';
+CREATE USER superset WITH PASSWORD 'superset';
+
+CREATE DATABASE iceberg OWNER iceberg;
+CREATE DATABASE superset OWNER superset;
+
+GRANT ALL PRIVILEGES ON DATABASE iceberg TO iceberg;
+GRANT ALL PRIVILEGES ON DATABASE superset TO superset;

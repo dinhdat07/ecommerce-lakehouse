@@ -53,6 +53,17 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
    python3 -m pytest -q
    ```
 
+## Docker Demo
+
+To run the laptop-friendly multi-node demo with Iceberg, Trino, and Superset:
+
+```bash
+bash infra/scripts/up-bi.sh
+bash infra/scripts/run-e2e-demo.sh
+```
+
+Then open `http://localhost:8088`, sign in with `admin` / `admin`, and open `/superset/dashboard/lakehouse-sample-dashboard/`.
+
 Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
 
 ## Key Documentation
@@ -61,6 +72,7 @@ Outputs are written under `data/lakehouse/` by default. Run metadata is stored i
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts
 - `docs/gap_analysis.md`: current implementation status and remaining gaps
 - `docs/local_setup.md`: local setup, sample data, and test commands
+- `docs/docker_laptop_stack.md`: laptop-friendly Docker Compose multi-node simulation
 - `docs/multi_node_readiness.md`: scaling path and shared-storage assumptions
 - `docs/deployment_3node_ubuntu.md`: step-by-step 3-node Ubuntu deployment guide
 - `docs/file_reference.md`: file roles and key classes/functions

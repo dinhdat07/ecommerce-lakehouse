@@ -93,7 +93,21 @@ This document summarizes the important added or modified files, their roles, and
 - `Makefile`
   - Role: ergonomic commands for bootstrap, testing, cleanup, and local runs.
 - `infra/docker-compose.yml`
-  - Role: bootstrap asset for future local services.
+  - Role: laptop-friendly multi-node simulation stack with MinIO, Kafka, Spark master, and one or two Spark workers.
+- `infra/scripts/common.sh`
+  - Role: Docker Compose helper wrapper that supports either `docker compose` or `docker-compose`.
+- `infra/scripts/up-core.sh`
+  - Role: start the lightweight default compose stack.
+- `infra/scripts/up-extended.sh`
+  - Role: start the stack with a second Spark worker for a more realistic multi-node simulation.
+- `infra/scripts/status.sh`
+  - Role: show the current compose service state.
+- `infra/scripts/verify.sh`
+  - Role: smoke-test Kafka topics, MinIO buckets, and Spark worker registration.
+- `infra/scripts/down.sh`
+  - Role: stop the compose stack without deleting persistent volumes.
+- `infra/scripts/purge.sh`
+  - Role: remove the compose stack, its volumes, and its service images to reclaim disk space.
 - `apps/sql/trino_gold_views.sql`
   - Role: serving-layer SQL view definitions aligned with Gold contracts.
 
@@ -102,6 +116,7 @@ This document summarizes the important added or modified files, their roles, and
 - `README.md`: repository overview and quick start.
 - `docs/gap_analysis.md`: current implementation status and remaining gaps.
 - `docs/local_setup.md`: local environment, sample data, and test instructions.
+- `docs/docker_laptop_stack.md`: laptop-friendly compose architecture, usage, and cleanup guidance.
 - `docs/multi_node_readiness.md`: current scaling posture and migration path.
 - `docs/deployment_3node_ubuntu.md`: step-by-step 3-server deployment guide.
 - `docs/improvements.md`: limitations and recommended next improvements.
