@@ -13,9 +13,10 @@ This document records the role of the main files added during the lakehouse impl
 
 ## Pipeline Core
 
-- `pipelines/bronze/backfill.py`: historical CSV and CSV.GZ ingestion into append-only Bronze JSONL.
-- `pipelines/silver/transform.py`: canonicalization, validation, partitioning, deduplication, and quarantine handling.
-- `pipelines/gold/aggregate.py`: Gold table builders for user, product, funnel, category, and session analytics.
+- `infra/jobs/batch_backfill_to_iceberg.py`: Phase 1 Spark batch job that materializes Bronze, Silver, and Gold as physical Iceberg tables.
+- `pipelines/bronze/backfill.py`: legacy local JSONL Bronze path retained for lightweight non-Docker smoke tests.
+- `pipelines/silver/transform.py`: canonicalization, validation, partitioning, deduplication, and quarantine handling for the local file-based path.
+- `pipelines/gold/aggregate.py`: Gold table builders for the local file-based path and shared business-rule reference logic.
 
 ## Entrypoints
 
@@ -31,4 +32,5 @@ This document records the role of the main files added during the lakehouse impl
 
 - `scripts/run_local_batch.sh`: local batch smoke path from sample input to Gold outputs.
 - `scripts/run_local_streaming.sh`: local replay-bus simulation for the streaming path.
-- `apps/sql/trino_gold_views.sql`: serving-layer SQL views aligned with the Gold contracts.
+- `apps/sql/trino_gold_views.sql`: legacy serving-layer SQL views from the pre-materialized demo path.
+- `infra/trino/sql/prepare_demo_views.sql`: legacy demo-view bootstrap kept for reference; not used by the Phase 1 Spark-only transformation flow.

@@ -1,3 +1,8 @@
+-- Legacy demo bootstrap for the earlier Trino-view flow.
+-- Phase 1 Bronze to Silver to Gold materialization now runs in Spark and writes
+-- physical Iceberg tables directly, so this file is no longer part of the
+-- active end-to-end path.
+
 CREATE SCHEMA IF NOT EXISTS iceberg.demo;
 
 CREATE OR REPLACE VIEW iceberg.demo.silver_events AS

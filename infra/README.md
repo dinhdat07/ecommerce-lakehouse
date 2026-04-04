@@ -21,7 +21,10 @@ The stack is intentionally minimal so it can run on a single laptop with constra
 - `scripts/up-core.sh`: start the lightweight default stack
 - `scripts/up-extended.sh`: start the stack with a second Spark worker
 - `scripts/up-bi.sh`: start the full local stack including Trino and Superset
-- `scripts/run-e2e-demo.sh`: load sample data, build Trino views, and bootstrap Superset assets
+- `scripts/run-sample-pipeline.sh`: run Bronze, Silver, and Gold materialization on a configurable sample file
+- `scripts/run-e2e-demo.sh`: materialize Bronze, Silver, and Gold Iceberg tables from a configurable demo sample, then bootstrap Superset assets
+- `scripts/run-full-backfill-manual.sh`: manually gated full historical backfill entrypoint
+- `scripts/reset-demo-state.sh`: remove demo warehouse/catalog state and local file-based outputs
 - `scripts/verify.sh`: smoke-test the stack
 - `scripts/down.sh`: stop containers while keeping volumes
 - `scripts/purge.sh`: remove containers, volumes, network, and service images

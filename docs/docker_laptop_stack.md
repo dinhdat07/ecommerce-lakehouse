@@ -31,15 +31,16 @@ This stack simulates a small multi-node environment on one laptop while staying 
 
 The working demo path is:
 
-1. Spark loads the sample CSV into the Bronze Iceberg table.
-2. Trino exposes Silver and Gold demo views over that Bronze table.
-3. Superset connects to Trino and publishes a dashboard from the Gold views.
+1. `run-e2e-demo.sh` generates or reuses a sample CSV in `data/sample/`.
+2. Spark appends Bronze rows, incrementally inserts Silver rows, and materializes Gold Iceberg tables.
+3. Trino queries those physical Iceberg tables.
+4. Superset connects to Trino and publishes a dashboard from the Gold tables.
 
 ## Expected Disk Usage
 
 - First image pull: about `5-7 GB`
-- Named volumes during the demo: about `2-4 GB`
-- Safe working budget: about `12-18 GB`
+- Named volumes during the demo: about `0.5-1.5 GB`
+- Safe working budget: about `8-12 GB`
 
 With `30-40 GB` free on `C:`, this stack is realistic as long as you clean it up after testing.
 
@@ -47,7 +48,7 @@ With `30-40 GB` free on `C:`, this stack is realistic as long as you clean it up
 
 - `minio`: `0.75 CPU`, `768 MB RAM`
 - `kafka`: `1 CPU`, `1 GB RAM`
-- `spark-master`: `0.75 CPU`, `768 MB RAM`
+- `spark-master`: `1.25 CPU`, `2 GB RAM`
 - `spark-worker-1`: `1.25 CPU`, `1.75 GB RAM`
 - `spark-worker-2` optional: `1 CPU`, `1.25 GB RAM`
 - `postgres`: `0.5 CPU`, `512 MB RAM`
@@ -101,6 +102,18 @@ Run the full demo pipeline:
 bash infra/scripts/run-e2e-demo.sh
 ```
 
+Run only Bronze, Silver, and Gold on the sample without Superset:
+
+```bash
+bash infra/scripts/run-sample-pipeline.sh
+```
+
+Run the full demo pipeline with a smaller sample:
+
+```bash
+DEMO_SAMPLE_ROWS=50000 bash infra/scripts/run-e2e-demo.sh
+```
+
 Check status:
 
 ```bash
@@ -123,6 +136,18 @@ Delete containers, network, volumes, and service images:
 
 ```bash
 bash infra/scripts/purge.sh
+```
+
+Reset only demo warehouse/catalog state while keeping images:
+
+```bash
+bash infra/scripts/reset-demo-state.sh
+```
+
+Manual full historical backfill stays opt-in only:
+
+```bash
+MANUAL_FULL_BACKFILL=1 FULL_START_MONTH=2019-10 FULL_END_MONTH=2020-02 bash infra/scripts/run-full-backfill-manual.sh
 ```
 
 ## Step-by-Step Workflow
@@ -153,6 +178,10 @@ bash infra/scripts/purge.sh
    bash infra/scripts/up-bi.sh
    bash infra/scripts/run-e2e-demo.sh
    ```
+   Optional:
+   ```bash
+   DEMO_SAMPLE_ROWS=50000 bash infra/scripts/run-e2e-demo.sh
+   ```
 7. Open Superset:
    ```text
    http://localhost:8088
@@ -177,13 +206,16 @@ bash infra/scripts/purge.sh
 - Spark master UI lists the registered workers
 - Trino responds on `http://localhost:8080/v1/info`
 - Superset health responds on `http://localhost:8088/health`
-- Trino lists `iceberg.demo.bronze_events`, `silver_events`, `gold_revenue_by_category`, and `gold_conversion_funnel`
+- Trino lists `iceberg.demo.bronze_events`, `silver_events`, `daily_revenue`, `top_products`, `conversion_funnel_daily`, `category_performance_daily`, `session_funnel`, and `user_conversion_path`
 - Superset serves the dashboard at `http://localhost:8088/superset/dashboard/lakehouse-sample-dashboard/`
+- Trino validation SQL is available in `infra/trino/sql/validate_silver_gold.sql`
 
 ## Best Practices To Avoid Disk Bloat
 
 - Use `up-core.sh` unless you specifically need the second worker.
 - Use `run-e2e-demo.sh` instead of manual commands if you want the full BI demo.
+- Keep `DEMO_SAMPLE_ROWS` at `100000` or lower on laptop/WSL setups.
+- Do not place large historical files in `data/raw/` for the default Docker demo workflow.
 - Run `purge.sh` after testing if disk space is tight.
 - Keep Kafka retention short and topic sizes small in laptop mode.
 - Avoid large datasets during service smoke tests.

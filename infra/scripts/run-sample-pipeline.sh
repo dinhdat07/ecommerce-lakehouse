@@ -5,12 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/scripts/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-full_compose() {
-  compose --profile core --profile extended --profile serving --profile bi "$@"
+sample_compose() {
+  compose --profile core --profile serving "$@"
 }
 
-profiled_service_cid() {
-  full_compose ps -q "$1"
+sample_service_cid() {
+  sample_compose ps -q "$1"
 }
 
 wait_for_http() {
@@ -29,7 +29,7 @@ wait_for_http() {
 
 require_running() {
   local service="$1"
-  if [[ -z "$(profiled_service_cid "${service}")" ]]; then
+  if [[ -z "$(sample_service_cid "${service}")" ]]; then
     echo "error: service ${service} is not running." >&2
     exit 1
   fi
@@ -47,16 +47,14 @@ fi
 
 DEMO_SAMPLE_CONTAINER_PATH="/workspace/${DEMO_SAMPLE_FILE#./}"
 
-full_compose up -d
+sample_compose up -d
 
 wait_for_http "http://localhost:8080/v1/info" "Trino"
-wait_for_http "http://localhost:8088/health" "Superset"
 
 require_running spark-master
 require_running trino
-require_running superset
 
-docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
+docker exec "$(sample_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --master local[2] \
   --driver-memory 1400m \
   --conf spark.jars.ivy=/tmp/.ivy2 \
@@ -91,10 +89,8 @@ docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --end-month "${DEMO_SOURCE_MONTH}" \
   $( [[ "${DEMO_RESET_TABLES}" == "1" ]] && printf '%s' "--reset-tables" )
 
-docker exec "$(profiled_service_cid superset)" python /app/bootstrap/bootstrap_superset.py
-
-echo "E2E demo prepared."
+echo "Sample pipeline prepared."
 echo "Sample file: ${DEMO_SAMPLE_FILE}"
 echo "Sample rows target: ${DEMO_SAMPLE_ROWS}"
-echo "Superset URL: http://localhost:8088"
-echo "Dashboard URL: http://localhost:8088/superset/dashboard/lakehouse-sample-dashboard/"
+echo "Verify counts with:"
+echo "  docker exec $(sample_service_cid trino) trino --execute \"SELECT count(*) FROM iceberg.demo.bronze_events\""

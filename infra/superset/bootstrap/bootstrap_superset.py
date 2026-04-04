@@ -14,7 +14,7 @@ from sqlalchemy import inspect
 
 
 def build_table_form_data(dataset_id: int) -> dict[str, object]:
-    """Return a stable Superset table chart payload for the revenue dataset."""
+    """Return a stable Superset table chart payload for the category dataset."""
 
     return {
         "datasource": f"{dataset_id}__table",
@@ -24,7 +24,7 @@ def build_table_form_data(dataset_id: int) -> dict[str, object]:
         "all_columns": [
             "event_date",
             "category_code",
-            "purchase_count",
+            "purchases",
             "purchase_revenue",
             "unique_buyers",
         ],
@@ -163,7 +163,7 @@ def main() -> None:
             available_objects = set(inspector.get_table_names(schema="demo")) | set(
                 inspector.get_view_names(schema="demo")
             )
-        required_objects = {"gold_revenue_by_category", "gold_conversion_funnel"}
+        required_objects = {"category_performance_daily", "conversion_funnel_daily"}
         if not required_objects.issubset(available_objects):
             current_app.logger.warning(
                 "Superset bootstrap skipped dataset/chart creation because required Trino objects are missing: %s",
@@ -171,7 +171,7 @@ def main() -> None:
             )
             return
 
-        for table_name in ["gold_revenue_by_category", "gold_conversion_funnel"]:
+        for table_name in ["category_performance_daily", "conversion_funnel_daily"]:
             dataset = (
                 db.session.query(SqlaTable)
                 .filter_by(table_name=table_name, schema="demo", database_id=database.id)
@@ -184,19 +184,19 @@ def main() -> None:
                 dataset.fetch_metadata()
                 db.session.commit()
 
-        revenue_dataset = (
+        category_dataset = (
             db.session.query(SqlaTable)
-            .filter_by(table_name="gold_revenue_by_category", schema="demo", database_id=database.id)
+            .filter_by(table_name="category_performance_daily", schema="demo", database_id=database.id)
             .one()
         )
 
-        chart = db.session.query(Slice).filter_by(slice_name="Revenue by Category").one_or_none()
-        form_data = build_table_form_data(revenue_dataset.id)
+        chart = db.session.query(Slice).filter_by(slice_name="Category Performance by Day").one_or_none()
+        form_data = build_table_form_data(category_dataset.id)
         if chart is None:
             chart = Slice(
-                slice_name="Revenue by Category",
+                slice_name="Category Performance by Day",
                 datasource_type="table",
-                datasource_id=revenue_dataset.id,
+                datasource_id=category_dataset.id,
                 viz_type="table",
                 params=json.dumps(form_data),
             )
@@ -204,11 +204,11 @@ def main() -> None:
             db.session.commit()
         else:
             chart.datasource_type = "table"
-            chart.datasource_id = revenue_dataset.id
+            chart.datasource_id = category_dataset.id
             chart.viz_type = "table"
             chart.params = json.dumps(form_data)
 
-        chart.query_context = json.dumps(build_query_context(revenue_dataset.id, chart.id, form_data))
+        chart.query_context = json.dumps(build_query_context(category_dataset.id, chart.id, form_data))
         db.session.commit()
 
         dashboard = db.session.query(Dashboard).filter_by(slug="lakehouse-sample-dashboard").one_or_none()

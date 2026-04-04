@@ -5,12 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/scripts/common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-full_compose() {
-  compose --profile core --profile extended --profile serving --profile bi "$@"
+manual_compose() {
+  compose --profile core --profile serving "$@"
 }
 
-profiled_service_cid() {
-  full_compose ps -q "$1"
+manual_service_cid() {
+  manual_compose ps -q "$1"
 }
 
 wait_for_http() {
@@ -29,34 +29,31 @@ wait_for_http() {
 
 require_running() {
   local service="$1"
-  if [[ -z "$(profiled_service_cid "${service}")" ]]; then
+  if [[ -z "$(manual_service_cid "${service}")" ]]; then
     echo "error: service ${service} is not running." >&2
     exit 1
   fi
 }
 
-DEMO_SAMPLE_ROWS="${DEMO_SAMPLE_ROWS:-100000}"
-DEMO_SOURCE_MONTH="${DEMO_SOURCE_MONTH:-2020-04}"
-DEMO_SAMPLE_FILE="${DEMO_SAMPLE_FILE:-data/sample/events_demo_${DEMO_SAMPLE_ROWS}.csv}"
-DEMO_REGENERATE="${DEMO_REGENERATE:-0}"
-DEMO_RESET_TABLES="${DEMO_RESET_TABLES:-1}"
-
-if [[ ! -f "${DEMO_SAMPLE_FILE}" || "${DEMO_REGENERATE}" == "1" ]]; then
-  python3 scripts/create_sample.py --rows "${DEMO_SAMPLE_ROWS}" --output "${DEMO_SAMPLE_FILE}"
+if [[ "${MANUAL_FULL_BACKFILL:-0}" != "1" ]]; then
+  echo "error: full backfill is intentionally gated." >&2
+  echo "run with MANUAL_FULL_BACKFILL=1 FULL_START_MONTH=YYYY-MM FULL_END_MONTH=YYYY-MM bash infra/scripts/run-full-backfill-manual.sh" >&2
+  exit 1
 fi
 
-DEMO_SAMPLE_CONTAINER_PATH="/workspace/${DEMO_SAMPLE_FILE#./}"
+FULL_START_MONTH="${FULL_START_MONTH:?set FULL_START_MONTH=YYYY-MM}"
+FULL_END_MONTH="${FULL_END_MONTH:?set FULL_END_MONTH=YYYY-MM}"
+FULL_INPUT_DIR="${FULL_INPUT_DIR:-/workspace/data/raw}"
+FULL_RESUME_FROM="${FULL_RESUME_FROM:-full}"
+FULL_RESET_TABLES="${FULL_RESET_TABLES:-0}"
 
-full_compose up -d
+manual_compose up -d
 
 wait_for_http "http://localhost:8080/v1/info" "Trino"
-wait_for_http "http://localhost:8088/health" "Superset"
 
 require_running spark-master
-require_running trino
-require_running superset
 
-docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
+docker exec "$(manual_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --master local[2] \
   --driver-memory 1400m \
   --conf spark.jars.ivy=/tmp/.ivy2 \
@@ -85,16 +82,10 @@ docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --conf spark.sql.catalog.lakehouse.s3.path-style-access=true \
   --conf spark.sql.catalog.lakehouse.client.region=us-east-1 \
   /workspace/jobs/batch_backfill_to_iceberg.py \
-  --input-file "${DEMO_SAMPLE_CONTAINER_PATH}" \
-  --source-month "${DEMO_SOURCE_MONTH}" \
-  --start-month "${DEMO_SOURCE_MONTH}" \
-  --end-month "${DEMO_SOURCE_MONTH}" \
-  $( [[ "${DEMO_RESET_TABLES}" == "1" ]] && printf '%s' "--reset-tables" )
+  --input-dir "${FULL_INPUT_DIR}" \
+  --start-month "${FULL_START_MONTH}" \
+  --end-month "${FULL_END_MONTH}" \
+  --resume-from "${FULL_RESUME_FROM}" \
+  $( [[ "${FULL_RESET_TABLES}" == "1" ]] && printf '%s' "--reset-tables" )
 
-docker exec "$(profiled_service_cid superset)" python /app/bootstrap/bootstrap_superset.py
-
-echo "E2E demo prepared."
-echo "Sample file: ${DEMO_SAMPLE_FILE}"
-echo "Sample rows target: ${DEMO_SAMPLE_ROWS}"
-echo "Superset URL: http://localhost:8088"
-echo "Dashboard URL: http://localhost:8088/superset/dashboard/lakehouse-sample-dashboard/"
+echo "Manual full backfill completed for ${FULL_START_MONTH}..${FULL_END_MONTH}"

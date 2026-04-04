@@ -2,8 +2,11 @@
 
 This job is intended for the laptop Docker Compose stack. It runs on the Spark
 cluster, stores table metadata in the Iceberg JDBC catalog backed by Postgres,
-and writes table data to MinIO. The downstream Silver and Gold demo layers are
-prepared by Trino views in ``infra/trino/sql/prepare_demo_views.sql``.
+and writes table data to MinIO.
+
+This helper is retained for quick Bronze-only smoke tests. Phase 1 end-to-end
+materialization now uses ``infra/jobs/batch_backfill_to_iceberg.py`` instead of
+Trino views.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ def main() -> None:
 
     print("Loaded Iceberg table:")
     print(" - lakehouse.demo.bronze_events")
-    print("Next step: apply infra/trino/sql/prepare_demo_views.sql in Trino to expose Silver and Gold demo views.")
+    print("Next step: run infra/jobs/batch_backfill_to_iceberg.py for full Bronze to Silver to Gold materialization.")
 
     spark.stop()
 

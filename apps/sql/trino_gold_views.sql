@@ -1,5 +1,6 @@
--- Trino-facing serving views for the future Iceberg catalog.
--- These views mirror the locally materialized Gold contracts.
+-- Legacy Trino-facing serving views for the earlier demo path.
+-- Phase 1 historical backfill now materializes physical Iceberg Gold tables in
+-- `lakehouse.demo`, so this file is retained only as a reference contract.
 
 CREATE SCHEMA IF NOT EXISTS analytics;
 

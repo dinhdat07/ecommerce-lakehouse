@@ -4,11 +4,11 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 
 ## Current Implementation
 
-- Historical ingestion from CSV and CSV.GZ into append-only Bronze JSONL
-- Canonical Silver transformation with validation, normalization, and quarantine handling
-- Gold analytics outputs for user, product, funnel, category, and session metrics
-- Streaming-friendly local replay bus that mirrors the future Kafka path
-- Run manifests, serving SQL, and architecture/operator documentation
+- Historical batch ingestion from CSV and CSV.GZ into physical Bronze Iceberg tables
+- Canonical Silver materialization with normalization, null handling, and deduplication
+- Gold Iceberg tables for revenue, product ranking, funnel, category, session, and user-path analytics
+- Trino as the query layer over Iceberg tables
+- Superset demo dashboard backed by physical Gold tables
 
 ## Target Platform
 
@@ -55,14 +55,50 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 
 ## Docker Demo
 
-To run the laptop-friendly multi-node demo with Iceberg, Trino, and Superset:
+To run the laptop-friendly Phase 1 demo with Iceberg, Trino, and Superset:
 
 ```bash
 bash infra/scripts/up-bi.sh
 bash infra/scripts/run-e2e-demo.sh
 ```
 
+By default the demo script:
+
+1. generates or reuses a local sample CSV at about `100k` rows
+2. resets the demo tables
+3. materializes Bronze, Silver, and Gold Iceberg tables from that sample only
+
 Then open `http://localhost:8088`, sign in with `admin` / `admin`, and open `/superset/dashboard/lakehouse-sample-dashboard/`.
+
+To change the demo size safely:
+
+```bash
+DEMO_SAMPLE_ROWS=50000 bash infra/scripts/run-e2e-demo.sh
+```
+
+To reset all demo state before rerunning:
+
+```bash
+bash infra/scripts/reset-demo-state.sh
+```
+
+To run Bronze, Silver, and Gold without Superset:
+
+```bash
+bash infra/scripts/run-sample-pipeline.sh
+```
+
+To run a manual full backfill, opt in explicitly:
+
+```bash
+MANUAL_FULL_BACKFILL=1 FULL_START_MONTH=2019-10 FULL_END_MONTH=2020-02 bash infra/scripts/run-full-backfill-manual.sh
+```
+
+To validate Silver and Gold in Trino:
+
+```bash
+docker exec -i ecommerce-lakehouse-laptop-trino-1 trino < infra/trino/sql/validate_silver_gold.sql
+```
 
 Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
 

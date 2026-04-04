@@ -41,7 +41,7 @@ sudo apt install -y python3 python3-venv python3-pip
 ## Sample Data
 
 - Checked-in sample: `data/sample/events_sample_100k.csv`
-- Historical raw example: `data/raw/2019-Oct.csv.gz`
+- Default Docker demo input: generated or reused sample CSV at about `100k` rows
 - Synthetic sample generator:
   ```bash
   python3 scripts/create_sample.py --rows 1000 --output data/sample/events_sample.csv

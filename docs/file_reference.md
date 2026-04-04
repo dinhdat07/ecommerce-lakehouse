@@ -108,8 +108,10 @@ This document summarizes the important added or modified files, their roles, and
   - Role: stop the compose stack without deleting persistent volumes.
 - `infra/scripts/purge.sh`
   - Role: remove the compose stack, its volumes, and its service images to reclaim disk space.
+- `infra/jobs/batch_backfill_to_iceberg.py`
+  - Role: Phase 1 Spark job that materializes Bronze, Silver, and Gold as physical Iceberg tables from historical CSV inputs.
 - `apps/sql/trino_gold_views.sql`
-  - Role: serving-layer SQL view definitions aligned with Gold contracts.
+  - Role: legacy serving-layer SQL view definitions retained for reference from the earlier view-based demo path.
 
 ## Documentation
 
