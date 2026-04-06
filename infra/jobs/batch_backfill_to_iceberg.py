@@ -14,7 +14,7 @@ import re
 from datetime import date
 from pathlib import Path
 
-from pyspark.sql import DataFrame, SparkSession, Window
+from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 CATALOG = "lakehouse"
@@ -149,6 +149,13 @@ def append_to_iceberg(table_name: str, dataframe: DataFrame, partitions: int | N
 
     prepared = dataframe.repartition(partitions) if partitions is not None else dataframe
     prepared.writeTo(table_name).option("fanout-enabled", "true").append()
+
+
+def infer_source_month_from_event_time(column_name: str) -> Column:
+    """Infer a logical source month in YYYY-MM format from an event timestamp."""
+
+    parsed_event_time = parse_event_timestamp(column_name)
+    return F.date_format(parsed_event_time, "yyyy-MM")
 
 
 def drop_tables_if_requested(spark: SparkSession, enabled: bool) -> None:
@@ -347,6 +354,39 @@ def create_tables_if_needed(spark: SparkSession) -> None:
     )
 
 
+def project_bronze_columns(
+    raw: DataFrame,
+    *,
+    batch_run_id: str,
+    source_type: str,
+    source_file: Column,
+    source_month: Column,
+) -> DataFrame:
+    """Project raw event columns into the shared Bronze Iceberg schema."""
+
+    return (
+        raw.select(
+            F.lit(batch_run_id).alias("batch_run_id"),
+            F.current_timestamp().alias("ingested_at"),
+            F.lit(source_type).alias("source_type"),
+            source_file.alias("source_file"),
+            source_month.alias("source_month"),
+            F.sha2(F.concat_ws("||", source_file, *[F.coalesce(F.col(column), F.lit("")) for column in raw.columns]), 256)
+            .alias("record_hash"),
+            F.col("event_time").cast("string").alias("event_time"),
+            F.col("event_type").cast("string").alias("event_type"),
+            F.col("product_id").cast("string").alias("product_id"),
+            F.col("category_id").cast("string").alias("category_id"),
+            F.col("category_code").cast("string").alias("category_code"),
+            F.col("brand").cast("string").alias("brand"),
+            F.col("price").cast("string").alias("price"),
+            F.col("user_id").cast("string").alias("user_id"),
+            F.col("user_session").cast("string").alias("user_session"),
+        )
+        .where(F.col("source_month").isNotNull())
+    )
+
+
 def read_bronze_batch(
     spark: SparkSession,
     input_files: list[Path],
@@ -372,26 +412,26 @@ def read_bronze_batch(
         else F.concat_ws("-", source_year, month_map[source_month_name])
     )
 
-    return (
-        raw.select(
-            F.lit(batch_run_id).alias("batch_run_id"),
-            F.current_timestamp().alias("ingested_at"),
-            F.lit("historical_csv").alias("source_type"),
-            source_file.alias("source_file"),
-            source_month.alias("source_month"),
-            F.sha2(F.concat_ws("||", source_file, *[F.coalesce(F.col(column), F.lit("")) for column in raw.columns]), 256)
-            .alias("record_hash"),
-            F.col("event_time").cast("string").alias("event_time"),
-            F.col("event_type").cast("string").alias("event_type"),
-            F.col("product_id").cast("string").alias("product_id"),
-            F.col("category_id").cast("string").alias("category_id"),
-            F.col("category_code").cast("string").alias("category_code"),
-            F.col("brand").cast("string").alias("brand"),
-            F.col("price").cast("string").alias("price"),
-            F.col("user_id").cast("string").alias("user_id"),
-            F.col("user_session").cast("string").alias("user_session"),
-        )
-        .where(F.col("source_month").isNotNull())
+    return project_bronze_columns(
+        raw,
+        batch_run_id=batch_run_id,
+        source_type="historical_csv",
+        source_file=source_file,
+        source_month=source_month,
+    )
+
+
+def build_streaming_bronze_batch(batch_df: DataFrame, batch_run_id: str) -> DataFrame:
+    """Project a parsed Kafka replay micro-batch into the shared Bronze schema."""
+
+    source_file = F.coalesce(F.col("source_file"), F.lit("kafka_replay"))
+    source_month = F.coalesce(F.col("source_month"), infer_source_month_from_event_time("event_time"))
+    return project_bronze_columns(
+        batch_df,
+        batch_run_id=batch_run_id,
+        source_type="kafka_replay",
+        source_file=source_file,
+        source_month=source_month,
     )
 
 
@@ -773,6 +813,32 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
     return row_counts
 
 
+def process_bronze_batch(
+    spark: SparkSession,
+    bronze_batch: DataFrame,
+    *,
+    append_bronze: bool,
+    bronze_partitions: int = 8,
+    silver_partitions: int = 8,
+) -> dict[str, object]:
+    """Process a Bronze DataFrame through Silver and Gold using the shared Phase 1 logic."""
+
+    if append_bronze:
+        new_bronze_rows = insert_new_bronze_rows(spark, bronze_batch)
+        append_to_iceberg(BRONZE_TABLE, new_bronze_rows, partitions=bronze_partitions)
+
+    silver_candidates = build_silver_candidates(bronze_batch)
+    inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
+    affected_dates = sorted(str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect())
+    if affected_dates:
+        append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=silver_partitions)
+    gold_row_counts = refresh_gold_tables(spark, affected_dates)
+    return {
+        "affected_dates": affected_dates,
+        "gold_row_counts": gold_row_counts,
+    }
+
+
 def main() -> None:
     """Run the full historical Bronze, Silver, and Gold backfill pipeline."""
 
@@ -796,15 +862,15 @@ def main() -> None:
         bronze_batch = read_bronze_slice(spark, args.start_month, args.end_month)
     else:
         bronze_batch = read_bronze_batch(spark, input_files, batch_run_id, source_month_override=args.source_month)
-        new_bronze_rows = insert_new_bronze_rows(spark, bronze_batch)
-        append_to_iceberg(BRONZE_TABLE, new_bronze_rows, partitions=8)
-
-    silver_candidates = build_silver_candidates(bronze_batch)
-    inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
-    affected_dates = sorted(str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect())
-    if affected_dates:
-        append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=8)
-    gold_row_counts = refresh_gold_tables(spark, affected_dates)
+    process_result = process_bronze_batch(
+        spark,
+        bronze_batch,
+        append_bronze=args.resume_from != "silver",
+        bronze_partitions=8,
+        silver_partitions=8,
+    )
+    affected_dates = process_result["affected_dates"]
+    gold_row_counts = process_result["gold_row_counts"]
 
     print("Historical batch backfill complete.")
     print(f"Resume mode: {args.resume_from}")

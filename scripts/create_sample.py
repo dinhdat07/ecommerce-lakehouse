@@ -28,10 +28,21 @@ def parse_args() -> argparse.Namespace:
         help="Output CSV path.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible output.")
+    parser.add_argument(
+        "--start-date",
+        default="2020-04-01T10:00:00Z",
+        help="Inclusive UTC start timestamp for generated events.",
+    )
+    parser.add_argument(
+        "--days-span",
+        type=int,
+        default=0,
+        help="If greater than zero, spread events randomly across this many days and sort by event_time.",
+    )
     return parser.parse_args()
 
 
-def generate_row(i: int, start_dt: datetime) -> dict[str, str]:
+def generate_row(i: int, start_dt: datetime, days_span: int) -> dict[str, str]:
     event_types = ["view", "cart", "purchase"]
     event_type_weights = [0.8, 0.15, 0.05]
     categories = [
@@ -48,7 +59,11 @@ def generate_row(i: int, start_dt: datetime) -> dict[str, str]:
     session_id = f"sess-{random.randint(1, 20000):05d}"
     event_type = random.choices(event_types, weights=event_type_weights, k=1)[0]
     price = round(random.uniform(5.0, 1500.0), 2)
-    event_time = start_dt + timedelta(seconds=i * random.randint(1, 3))
+    if days_span > 0:
+        offset_seconds = random.randint(0, max(days_span * 24 * 60 * 60 - 1, 0))
+        event_time = start_dt + timedelta(seconds=offset_seconds)
+    else:
+        event_time = start_dt + timedelta(seconds=i * random.randint(1, 3))
 
     return {
         "event_time": event_time.isoformat().replace("+00:00", "Z"),
@@ -70,8 +85,10 @@ def main() -> None:
     out_file = Path(args.output)
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
-    start_dt = datetime(2020, 4, 1, 10, 0, 0, tzinfo=timezone.utc)
-    rows = [generate_row(i, start_dt) for i in range(args.rows)]
+    start_dt = datetime.fromisoformat(args.start_date.replace("Z", "+00:00")).astimezone(timezone.utc)
+    rows = [generate_row(i, start_dt, args.days_span) for i in range(args.rows)]
+    if args.days_span > 0:
+        rows.sort(key=lambda row: row["event_time"])
 
     fieldnames = list(rows[0].keys())
     with out_file.open("w", encoding="utf-8", newline="") as f:

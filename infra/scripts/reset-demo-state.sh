@@ -17,8 +17,8 @@ docker volume rm \
   ecommerce-lakehouse-laptop_spark_worker2_data \
   >/dev/null 2>&1 || true
 
-rm -rf data/lakehouse data/manifests
-mkdir -p data/lakehouse data/manifests data/raw
+rm -rf data/lakehouse data/manifests checkpoints/local_bus checkpoints/streaming_ingest_csv checkpoints/phase2
+mkdir -p data/lakehouse data/manifests data/raw checkpoints
 touch data/raw/.gitkeep data/manifests/.gitkeep
 
 echo "Demo state reset complete."

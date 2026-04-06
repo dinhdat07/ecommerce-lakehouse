@@ -2,28 +2,26 @@
 
 ## Current Status
 
-The repository now has a working local Bronze -> Silver -> Gold pipeline and a streaming-friendly replay path. Core data processing, manifests, tests, and serving SQL are present.
+The repository now has a working Phase 1 Spark + Iceberg batch pipeline and a bounded Phase 2 Kafka + Spark Structured Streaming demo path. Core data processing, validation SQL, tests, and serving integrations are present for laptop-scale runs.
 
 ## Gaps Closed In This Iteration
 
-- Added practical test/tooling files: `requirements-dev.txt`, `requirements-platform.txt`, `Makefile`, and `scripts/bootstrap_local.sh`.
-- Added zero-dependency verification through `scripts/verify_local.py`.
-- Added local cleanup tooling with `scripts/clean_local_state.sh`.
-- Fixed the replay producer default so a checked-in sample file works out of the box.
-- Reduced memory pressure in the local streaming ingest path by streaming replay-bus rows into CSV instead of loading them all first.
-- Added detailed local setup, multi-node readiness, and 3-node deployment documentation.
+- Materialized Bronze, Silver, and all six Gold outputs as physical Iceberg tables.
+- Reused the Phase 1 Spark transformations from both batch and streaming execution paths.
+- Added bounded Kafka replay, Spark Structured Streaming ingestion, and incremental Silver/Gold refresh for March-April demo data.
+- Added Phase 2 orchestration and validation SQL for repeatable local runs.
 
 ## Remaining Limitations
 
-- The default runtime still uses filesystem-backed JSONL/CSV outputs rather than Spark + Iceberg tables.
-- Streaming mode is micro-batch style and uses a local replay bus fallback when Kafka is unavailable.
-- Gold aggregation currently recomputes from Silver inputs rather than performing incremental stateful upserts.
-- Production services in `infra/docker-compose.yml` are illustrative bootstrap assets and are not yet integrated into automated local orchestration.
-- True multi-node execution still requires external infrastructure: shared object storage or mounted shared storage, a Spark cluster, Kafka brokers, Trino catalog configuration, and Superset metadata persistence.
+- Phase 2 is a bounded demo job, not a continuously running production stream.
+- Gold refresh is incremental by affected date partitions, but still recomputes each affected partition from Silver rather than maintaining stateful incremental aggregates.
+- Kafka remains single-broker and Spark runs in a laptop-oriented local-submit mode inside the Docker stack.
+- Older local fallback streaming entrypoints remain in the repo for non-Docker development and are not the primary Phase 2 path.
+- True multi-node production still requires externalized storage durability, stronger Kafka topology, Spark cluster scheduling, orchestration, and secrets management.
 
 ## Recommended Next Priorities
 
-1. Introduce a Spark/Iceberg backend behind the existing pipeline interfaces.
-2. Add integration tests that compare the filesystem backend and Spark backend on the same sample slice.
-3. Promote manifests and quality counters into queryable audit tables.
-4. Replace the local replay bus with Kafka in automated CI or dev-environment tests once platform dependencies are available.
+1. Add integration tests that assert batch and streaming paths produce consistent Silver and Gold results on the same controlled slice.
+2. Introduce audit tables for replay batches, quality counters, and refresh-watermark tracking.
+3. Move the bounded shell orchestration into a small scheduler or workflow runner when longer-lived environments are needed.
+4. Promote Kafka, Spark, and Iceberg catalog settings into environment-specific config overlays for real multi-node deployment.

@@ -29,12 +29,13 @@ This stack simulates a small multi-node environment on one laptop while staying 
 - `superset-init`: one-shot Superset metadata/admin bootstrap
 - `superset`: BI UI and API on `http://localhost:8088`
 
-The working demo path is:
+The working demo paths are:
 
 1. `run-e2e-demo.sh` generates or reuses a sample CSV in `data/sample/`.
 2. Spark appends Bronze rows, incrementally inserts Silver rows, and materializes Gold Iceberg tables.
 3. Trino queries those physical Iceberg tables.
 4. Superset connects to Trino and publishes a dashboard from the Gold tables.
+5. `run-streaming-demo.sh` generates or reuses a bounded March-April sample, replays it to Kafka, and uses Spark Structured Streaming to refresh physical Bronze, Silver, and Gold tables.
 
 ## Expected Disk Usage
 
@@ -72,6 +73,8 @@ All persistent state is stored in named Docker volumes defined in `infra/docker-
 
 Containers also use log rotation to avoid log bloat.
 
+The Phase 2 streaming checkpoint lives inside the Spark master work volume under `/opt/spark/work-dir/checkpoints/phase2/...`, which avoids WSL bind-mount permission issues and is removed automatically by `reset-demo-state.sh` or `purge.sh`.
+
 ## Commands
 
 Prerequisite:
@@ -96,6 +99,12 @@ Start the full BI stack:
 bash infra/scripts/up-bi.sh
 ```
 
+Bootstrap or refresh the Superset demo assets:
+
+```bash
+bash infra/scripts/bootstrap-superset.sh
+```
+
 Run the full demo pipeline:
 
 ```bash
@@ -112,6 +121,12 @@ Run the full demo pipeline with a smaller sample:
 
 ```bash
 DEMO_SAMPLE_ROWS=50000 bash infra/scripts/run-e2e-demo.sh
+```
+
+Run the bounded Phase 2 streaming demo:
+
+```bash
+STREAM_SAMPLE_ROWS=1500 STREAM_TIMEOUT_SECONDS=150 STREAM_MAX_OFFSETS_PER_TRIGGER=500 bash infra/scripts/run-streaming-demo.sh
 ```
 
 Check status:
@@ -187,6 +202,10 @@ MANUAL_FULL_BACKFILL=1 FULL_START_MONTH=2019-10 FULL_END_MONTH=2020-02 bash infr
    http://localhost:8088
    ```
    Use `admin` / `admin`, then open `/superset/dashboard/lakehouse-sample-dashboard/`.
+   If the dashboard assets ever need to be recreated:
+   ```bash
+   bash infra/scripts/bootstrap-superset.sh
+   ```
 8. After testing, stop the stack but keep data:
    ```bash
    bash infra/scripts/down.sh
@@ -209,12 +228,15 @@ MANUAL_FULL_BACKFILL=1 FULL_START_MONTH=2019-10 FULL_END_MONTH=2020-02 bash infr
 - Trino lists `iceberg.demo.bronze_events`, `silver_events`, `daily_revenue`, `top_products`, `conversion_funnel_daily`, `category_performance_daily`, `session_funnel`, and `user_conversion_path`
 - Superset serves the dashboard at `http://localhost:8088/superset/dashboard/lakehouse-sample-dashboard/`
 - Trino validation SQL is available in `infra/trino/sql/validate_silver_gold.sql`
+- Trino Phase 2 validation SQL is available in `infra/trino/sql/validate_streaming_phase2.sql`
 
 ## Best Practices To Avoid Disk Bloat
 
 - Use `up-core.sh` unless you specifically need the second worker.
 - Use `run-e2e-demo.sh` instead of manual commands if you want the full BI demo.
+- Use `run-streaming-demo.sh` for Phase 2 testing instead of running the streaming job manually.
 - Keep `DEMO_SAMPLE_ROWS` at `100000` or lower on laptop/WSL setups.
+- Keep `STREAM_SAMPLE_ROWS` around `1500` unless you explicitly raise the timeout for a larger replay.
 - Do not place large historical files in `data/raw/` for the default Docker demo workflow.
 - Run `purge.sh` after testing if disk space is tight.
 - Keep Kafka retention short and topic sizes small in laptop mode.

@@ -62,15 +62,19 @@ This document summarizes the important added or modified files, their roles, and
   - Role: operator CLI for batch Gold aggregation.
   - Main function: `main()` runs the shared Gold stage and logs written tables.
 - `apps/producer/replay_csv_to_kafka.py`
-  - Role: replay sample CSV rows to Kafka or a local fallback bus.
-  - Main items: `default_input_csv()`, `iter_csv_rows()`, `_write_local_bus()`, `main()`.
+  - Role: replay bounded sample CSV rows to Kafka with batch pacing suitable for laptop demos.
+  - Main items:
+    - `default_input_csv()`: selects the preferred sample file for replay.
+    - `derive_source_month()`: infers `YYYY-MM` from `event_time`.
+    - `build_message()`: wraps each CSV row in the replay envelope consumed by Spark.
+    - `send_with_console_producer()`: fallback Kafka sender using the containerized console producer.
+    - `main()`: runs the bounded replay.
 - `apps/streaming/kafka_to_bronze.py`
-  - Role: consume the local fallback bus and feed Bronze ingestion.
-  - Main items: `build_spark_session()` for future backend compatibility and `main()` for the local path.
+  - Role: legacy local fallback entrypoint retained for non-Docker development.
 - `apps/streaming/bronze_to_silver_stream.py`
-  - Role: streaming-friendly Silver entrypoint reusing the same transformation core.
+  - Role: legacy local fallback Silver entrypoint retained for non-Docker development.
 - `apps/streaming/silver_to_gold_stream.py`
-  - Role: streaming-friendly Gold entrypoint reusing the same aggregation core.
+  - Role: legacy local fallback Gold entrypoint retained for non-Docker development.
 - `scripts/run_local_batch.sh`
   - Role: simple sample-data batch run.
 - `scripts/run_local_streaming.sh`
@@ -110,6 +114,15 @@ This document summarizes the important added or modified files, their roles, and
   - Role: remove the compose stack, its volumes, and its service images to reclaim disk space.
 - `infra/jobs/batch_backfill_to_iceberg.py`
   - Role: Phase 1 Spark job that materializes Bronze, Silver, and Gold as physical Iceberg tables from historical CSV inputs.
+- `infra/jobs/kafka_stream_to_iceberg.py`
+  - Role: Phase 2 Spark Structured Streaming job that consumes Kafka replay events and incrementally refreshes Bronze, Silver, and Gold.
+  - Main items:
+    - `parse_replay_messages()`: parses Kafka JSON envelopes into typed rows.
+    - `process_microbatch()`: projects the Bronze micro-batch and reuses the shared Phase 1 transformation logic.
+    - `main()`: runs the bounded streaming query with configurable timeout and checkpointing.
+- `infra/scripts/run-streaming-demo.sh`
+  - Role: bounded orchestration for the laptop-safe Phase 2 demo.
+  - Main steps: generate March-April sample data, start the required Compose profiles, recreate the Kafka topic, launch the Spark streaming job, replay the sample to Kafka, and wait for the bounded query to finish.
 - `apps/sql/trino_gold_views.sql`
   - Role: legacy serving-layer SQL view definitions retained for reference from the earlier view-based demo path.
 

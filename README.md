@@ -4,7 +4,8 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 
 ## Current Implementation
 
-- Historical batch ingestion from CSV and CSV.GZ into physical Bronze Iceberg tables
+- Phase 1 batch backfill for `2019-10` to `2020-02` into physical Bronze, Silver, and Gold Iceberg tables
+- Phase 2 bounded streaming demo for `2020-03` to `2020-04` using Kafka replay and Spark Structured Streaming
 - Canonical Silver materialization with normalization, null handling, and deduplication
 - Gold Iceberg tables for revenue, product ranking, funnel, category, session, and user-path analytics
 - Trino as the query layer over Iceberg tables
@@ -55,7 +56,7 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 
 ## Docker Demo
 
-To run the laptop-friendly Phase 1 demo with Iceberg, Trino, and Superset:
+To run the laptop-friendly Phase 1 batch demo with Iceberg, Trino, and Superset:
 
 ```bash
 bash infra/scripts/up-bi.sh
@@ -69,6 +70,12 @@ By default the demo script:
 3. materializes Bronze, Silver, and Gold Iceberg tables from that sample only
 
 Then open `http://localhost:8088`, sign in with `admin` / `admin`, and open `/superset/dashboard/lakehouse-sample-dashboard/`.
+
+To re-apply the Superset demo assets explicitly:
+
+```bash
+bash infra/scripts/bootstrap-superset.sh
+```
 
 To change the demo size safely:
 
@@ -100,12 +107,27 @@ To validate Silver and Gold in Trino:
 docker exec -i ecommerce-lakehouse-laptop-trino-1 trino < infra/trino/sql/validate_silver_gold.sql
 ```
 
+To run the bounded Phase 2 streaming demo on top of the Phase 1 foundation:
+
+```bash
+STREAM_SAMPLE_ROWS=1500 STREAM_TIMEOUT_SECONDS=150 STREAM_MAX_OFFSETS_PER_TRIGGER=500 bash infra/scripts/run-streaming-demo.sh
+```
+
+Then validate March-April replay output:
+
+```bash
+docker exec -i ecommerce-lakehouse-laptop-trino-1 trino < infra/trino/sql/validate_streaming_phase2.sql
+```
+
+The streaming path is bounded by sample size, Kafka replay batch size, Spark timeout, and a container-local checkpoint directory on the Spark work volume so it stays safe on laptop/WSL environments.
+
 Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
 
 ## Key Documentation
 
 - `docs/architecture.md`: visible and hidden system architecture
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts
+- `docs/pipeline.md`: Bronze, Silver, Gold contracts and bounded Phase 2 refresh model
 - `docs/gap_analysis.md`: current implementation status and remaining gaps
 - `docs/local_setup.md`: local setup, sample data, and test commands
 - `docs/docker_laptop_stack.md`: laptop-friendly Docker Compose multi-node simulation

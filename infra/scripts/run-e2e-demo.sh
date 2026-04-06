@@ -91,7 +91,7 @@ docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --end-month "${DEMO_SOURCE_MONTH}" \
   $( [[ "${DEMO_RESET_TABLES}" == "1" ]] && printf '%s' "--reset-tables" )
 
-docker exec "$(profiled_service_cid superset)" python /app/bootstrap/bootstrap_superset.py
+bash "${SCRIPT_DIR}/bootstrap-superset.sh"
 
 echo "E2E demo prepared."
 echo "Sample file: ${DEMO_SAMPLE_FILE}"

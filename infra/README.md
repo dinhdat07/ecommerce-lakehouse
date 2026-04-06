@@ -21,8 +21,10 @@ The stack is intentionally minimal so it can run on a single laptop with constra
 - `scripts/up-core.sh`: start the lightweight default stack
 - `scripts/up-extended.sh`: start the stack with a second Spark worker
 - `scripts/up-bi.sh`: start the full local stack including Trino and Superset
+- `scripts/bootstrap-superset.sh`: apply the demo Superset database, datasets, and dashboard into the running BI stack
 - `scripts/run-sample-pipeline.sh`: run Bronze, Silver, and Gold materialization on a configurable sample file
 - `scripts/run-e2e-demo.sh`: materialize Bronze, Silver, and Gold Iceberg tables from a configurable demo sample, then bootstrap Superset assets
+- `scripts/run-streaming-demo.sh`: run the bounded Kafka -> Bronze -> Silver -> Gold streaming demo for March-April sample data
 - `scripts/run-full-backfill-manual.sh`: manually gated full historical backfill entrypoint
 - `scripts/reset-demo-state.sh`: remove demo warehouse/catalog state and local file-based outputs
 - `scripts/verify.sh`: smoke-test the stack
