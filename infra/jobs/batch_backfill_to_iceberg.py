@@ -17,6 +17,11 @@ from pathlib import Path
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
+try:
+    from dq_iceberg import assert_gold_dataframe_non_negative, assert_silver_dataframe_quality
+except ImportError:  # pragma: no cover - alternate import when running as a package
+    from infra.jobs.dq_iceberg import assert_gold_dataframe_non_negative, assert_silver_dataframe_quality
+
 CATALOG = "lakehouse"
 SCHEMA = "demo"
 BRONZE_TABLE = f"{CATALOG}.{SCHEMA}.bronze_events"
@@ -806,7 +811,29 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
     }
 
     row_counts: dict[str, int] = {}
+    gold_dq_specs: dict[str, tuple[str, tuple[str, ...]]] = {
+        GOLD_DAILY_REVENUE: ("daily_revenue", ("purchase_count", "purchase_revenue", "unique_buyers")),
+        GOLD_TOP_PRODUCTS: ("top_products", ("views", "carts", "purchases", "purchase_revenue", "unique_users")),
+        GOLD_CONVERSION_FUNNEL: ("conversion_funnel", ("views", "carts", "purchases")),
+        GOLD_CATEGORY_PERFORMANCE: (
+            "category_performance",
+            ("views", "carts", "purchases", "purchase_revenue", "unique_buyers"),
+        ),
+        GOLD_SESSION_FUNNEL: (
+            "session_funnel",
+            ("total_events", "distinct_products", "views", "carts", "purchases", "purchase_revenue"),
+        ),
+        GOLD_USER_CONVERSION_PATH: (
+            "user_conversion_path",
+            ("session_count", "views", "carts", "purchases", "purchase_revenue"),
+        ),
+    }
     for table_name, dataframe in gold_tables.items():
+        if dataframe.limit(1).count() > 0:
+            spec = gold_dq_specs.get(table_name)
+            if spec:
+                short_name, cols = spec
+                assert_gold_dataframe_non_negative(dataframe, name=short_name, columns=cols)
         delete_affected_partitions(spark, table_name, affected_dates)
         append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
         row_counts[table_name] = -1
@@ -829,6 +856,8 @@ def process_bronze_batch(
 
     silver_candidates = build_silver_candidates(bronze_batch)
     inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
+    if inserted_silver_rows.limit(1).count() > 0:
+        assert_silver_dataframe_quality(inserted_silver_rows)
     affected_dates = sorted(str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect())
     if affected_dates:
         append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=silver_partitions)

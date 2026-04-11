@@ -34,3 +34,39 @@ The stack is intentionally minimal so it can run on a single laptop with constra
 ## Operator Guide
 
 Use [docs/docker_laptop_stack.md](/mnt/e/coding/learn%20data/data%20engineering/ecommerce-lakehouse/docs/docker_laptop_stack.md) for step-by-step instructions, disk expectations, verification steps, and cleanup guidance.
+
+## Trino: `Cannot check and eventually update SQL schema`
+
+That message wraps the **real** error from Postgres. Check Trino logs for `Caused by:` — common cases:
+
+### A) `relation "iceberg_tables" does not exist`
+
+The `iceberg` database has **no Iceberg JDBC metadata tables** yet. Trino’s Iceberg connector does **not** auto-create them (`initializeCatalogTables=false`). They are created on a **fresh** Postgres volume by `infra/postgres/init/02-iceberg-jdbc-catalog-tables.sql`, or when **Spark** has successfully committed to the JDBC catalog at least once.
+
+**If your Postgres volume was created before that init script existed**, apply it once (idempotent):
+
+```bash
+bash infra/scripts/init-iceberg-jdbc-catalog.sh
+```
+
+Or from Git Bash / WSL, with the repo path correct:
+
+```bash
+docker exec -i ecommerce-lakehouse-laptop-postgres-1 psql -U postgres -v ON_ERROR_STOP=1 < infra/postgres/init/02-iceberg-jdbc-catalog-tables.sql
+```
+
+Then retry Trino (e.g. `SHOW TABLES FROM iceberg.demo`).
+
+### B) Schema migration / half-migrated JDBC catalog
+
+If logs show a different `PSQLException` (not “does not exist”), try resetting volumes and reloading the demo:
+
+```bash
+docker compose -f infra/docker-compose.yml --profile core --profile extended --profile serving --profile bi down -v
+bash infra/scripts/up-bi.sh
+bash infra/scripts/run-e2e-demo.sh
+```
+
+### C) Confirm Trino catalog flags
+
+`docker exec ecommerce-lakehouse-laptop-trino-1 cat /etc/trino/catalog/iceberg.properties` should include `iceberg.jdbc-catalog.schema-version=V0` so Trino matches the V0 JDBC layout used by Spark in this repo.

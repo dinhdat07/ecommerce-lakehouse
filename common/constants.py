@@ -36,3 +36,6 @@ GOLD_PATH = _env("GOLD_PATH", "s3a://gold/analytics")
 
 ICEBERG_CATALOG = _env("ICEBERG_CATALOG", "local_catalog")
 ICEBERG_WAREHOUSE = _env("ICEBERG_WAREHOUSE", "s3a://warehouse")
+
+# Data quality: abort publication when checks fail (Silver/Gold JSONL and Iceberg paths).
+DQ_FAIL_ON_ERROR = _env("DQ_FAIL_ON_ERROR", "true").strip().lower() in ("1", "true", "yes", "y")
