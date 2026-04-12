@@ -1,7 +1,8 @@
 """Publication gate data-quality checks for Silver and Gold outputs.
 
 Rules are applied immediately before writing Silver JSONL partitions or Gold
-CSVs (local pipeline) and are mirrored for Spark/Iceberg in ``infra/jobs/dq_iceberg.py``.
+CSVs (local pipeline) and are mirrored for Spark/Iceberg in
+``infra/jobs/dq_iceberg.py``.
 """
 
 from __future__ import annotations
@@ -11,6 +12,23 @@ from dataclasses import dataclass, field
 from common.quality import derive_event_date
 
 ALLOWED_EVENT_TYPES = frozenset({"view", "cart", "purchase"})
+SILVER_REQUIRED_COLUMNS = (
+    "event_time",
+    "event_date",
+    "event_type",
+    "product_id",
+    "user_id",
+)
+SILVER_CRITICAL_FIELDS = ("event_time", "event_date", "event_type")
+GOLD_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "conversion_funnel": ("event_date", "views", "carts", "purchases"),
+    "user_activity_summary": ("event_date", "total_events", "views", "carts", "purchases"),
+    "product_popularity": ("event_date", "views", "carts", "purchases"),
+    "session_summary": ("event_date", "total_events", "views", "carts", "purchases"),
+    "revenue_by_category": ("event_date", "purchase_count", "purchase_revenue", "unique_buyers"),
+}
+DQ_SEVERITY_CRITICAL = "critical"
+DQ_SEVERITY_WARNING = "warning"
 
 
 @dataclass(frozen=True)
@@ -20,6 +38,7 @@ class DQRuleResult:
     name: str
     passed: bool
     detail: str = ""
+    severity: str = DQ_SEVERITY_CRITICAL
 
 
 @dataclass
@@ -31,7 +50,9 @@ class DQReport:
 
     @property
     def passed(self) -> bool:
-        return all(rule.passed for rule in self.rules)
+        return all(
+            rule.passed for rule in self.rules if rule.severity == DQ_SEVERITY_CRITICAL
+        )
 
     def to_metrics(self) -> dict[str, object]:
         """Serialize for run manifests and logs."""
@@ -39,9 +60,23 @@ class DQReport:
         return {
             "dq_passed": self.passed,
             "dq_rules": [
-                {"name": r.name, "passed": r.passed, "detail": r.detail} for r in self.rules
+                {
+                    "name": r.name,
+                    "passed": r.passed,
+                    "detail": r.detail,
+                    "severity": r.severity,
+                }
+                for r in self.rules
             ],
         }
+
+
+def _is_missing(value: object) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _missing_columns(row: dict, required: tuple[str, ...]) -> list[str]:
+    return [column for column in required if column not in row]
 
 
 def validate_silver_rows_for_publication(rows: list[dict]) -> DQReport:
@@ -54,10 +89,21 @@ def validate_silver_rows_for_publication(rows: list[dict]) -> DQReport:
         return report
 
     invalid_event_type = 0
+    missing_required = 0
+    missing_critical = 0
+    invalid_timestamp = 0
     date_mismatch = 0
     bad_purchase_price = 0
+    duplicate_rows = 0
+    seen_rows: set[str] = set()
 
     for row in rows:
+        if _missing_columns(row, SILVER_REQUIRED_COLUMNS):
+            missing_required += 1
+
+        if any(_is_missing(row.get(field)) for field in SILVER_CRITICAL_FIELDS):
+            missing_critical += 1
+
         et = row.get("event_type")
         if et not in ALLOWED_EVENT_TYPES:
             invalid_event_type += 1
@@ -65,19 +111,65 @@ def validate_silver_rows_for_publication(rows: list[dict]) -> DQReport:
         event_time = row.get("event_time")
         event_date = row.get("event_date")
         if isinstance(event_time, str) and isinstance(event_date, str):
-            if derive_event_date(event_time) != event_date:
-                date_mismatch += 1
+            try:
+                if derive_event_date(event_time) != event_date:
+                    date_mismatch += 1
+            except Exception:
+                invalid_timestamp += 1
+        elif not _is_missing(event_time):
+            invalid_timestamp += 1
 
         if et == "purchase":
             price = row.get("price")
             if price is None or (isinstance(price, (int, float)) and price < 0):
                 bad_purchase_price += 1
 
+        duplicate_key = str(
+            (
+                row.get("event_id"),
+                row.get("dedupe_key"),
+                row.get("event_time"),
+                row.get("event_type"),
+                row.get("product_id"),
+                row.get("category_id"),
+                row.get("category_code"),
+                row.get("brand"),
+                row.get("price"),
+                row.get("user_id"),
+                row.get("user_session"),
+            )
+        )
+        if duplicate_key in seen_rows:
+            duplicate_rows += 1
+        else:
+            seen_rows.add(duplicate_key)
+
+    report.rules.append(
+        DQRuleResult(
+            "silver_required_columns_present",
+            missing_required == 0,
+            f"rows_with_missing_columns={missing_required} total={n}",
+        )
+    )
+    report.rules.append(
+        DQRuleResult(
+            "silver_critical_fields_not_null",
+            missing_critical == 0,
+            f"rows_with_null_critical_fields={missing_critical} total={n}",
+        )
+    )
     report.rules.append(
         DQRuleResult(
             "event_type_in_allowlist",
             invalid_event_type == 0,
             f"invalid_event_type_rows={invalid_event_type} total={n}",
+        )
+    )
+    report.rules.append(
+        DQRuleResult(
+            "event_time_is_valid_timestamp",
+            invalid_timestamp == 0,
+            f"invalid_timestamp_rows={invalid_timestamp} total={n}",
         )
     )
     report.rules.append(
@@ -92,6 +184,14 @@ def validate_silver_rows_for_publication(rows: list[dict]) -> DQReport:
             "purchase_has_non_negative_price",
             bad_purchase_price == 0,
             f"bad_purchase_price_rows={bad_purchase_price} total={n}",
+        )
+    )
+    report.rules.append(
+        DQRuleResult(
+            "silver_duplicate_rows_detected",
+            duplicate_rows == 0,
+            f"duplicate_rows={duplicate_rows} total={n}",
+            severity=DQ_SEVERITY_WARNING,
         )
     )
     return report
@@ -118,10 +218,36 @@ def validate_gold_tables_for_publication(tables: dict[str, list[dict]]) -> DQRep
             )
         )
 
+    def check_schema(table_name: str, rows: list[dict]) -> None:
+        required = GOLD_REQUIRED_COLUMNS.get(table_name, ())
+        missing_columns = 0
+        null_event_date = 0
+        for row in rows:
+            if _missing_columns(row, required):
+                missing_columns += 1
+            if "event_date" in required and _is_missing(row.get("event_date")):
+                null_event_date += 1
+        report.rules.append(
+            DQRuleResult(
+                f"{table_name}_required_columns_present",
+                missing_columns == 0,
+                f"rows_with_missing_columns={missing_columns} in {table_name}",
+            )
+        )
+        report.rules.append(
+            DQRuleResult(
+                f"{table_name}_event_date_not_null",
+                null_event_date == 0,
+                f"rows_with_null_event_date={null_event_date} in {table_name}",
+            )
+        )
+
     funnel = tables.get("conversion_funnel") or []
+    check_schema("conversion_funnel", funnel)
     check_non_negative_counts("conversion_funnel", funnel, ("views", "carts", "purchases"))
 
     user_act = tables.get("user_activity_summary") or []
+    check_schema("user_activity_summary", user_act)
     check_non_negative_counts(
         "user_activity_summary",
         user_act,
@@ -129,9 +255,11 @@ def validate_gold_tables_for_publication(tables: dict[str, list[dict]]) -> DQRep
     )
 
     product_pop = tables.get("product_popularity") or []
+    check_schema("product_popularity", product_pop)
     check_non_negative_counts("product_popularity", product_pop, ("views", "carts", "purchases"))
 
     sessions = tables.get("session_summary") or []
+    check_schema("session_summary", sessions)
     check_non_negative_counts(
         "session_summary",
         sessions,
@@ -139,6 +267,7 @@ def validate_gold_tables_for_publication(tables: dict[str, list[dict]]) -> DQRep
     )
 
     revenue_cat = tables.get("revenue_by_category") or []
+    check_schema("revenue_by_category", revenue_cat)
     check_non_negative_counts(
         "revenue_by_category",
         revenue_cat,

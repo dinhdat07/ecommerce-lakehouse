@@ -18,8 +18,17 @@ from pyspark.sql.types import StringType, StructField, StructType
 JOBS_DIR = Path(__file__).resolve().parent
 if str(JOBS_DIR) not in sys.path:
     sys.path.insert(0, str(JOBS_DIR))
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from batch_backfill_to_iceberg import build_streaming_bronze_batch, create_tables_if_needed, process_bronze_batch
+from batch_backfill_to_iceberg import (  # noqa: E402
+    build_streaming_bronze_batch,
+    create_tables_if_needed,
+    process_bronze_batch,
+)
+from common.observability import record_stage_event, stage_elapsed_seconds, stage_timer  # noqa: E402
+from common.runtime import utc_now_iso  # noqa: E402
 
 REPLAY_MESSAGE_SCHEMA = StructType(
     [
@@ -45,6 +54,8 @@ REPLAY_MESSAGE_SCHEMA = StructType(
         ),
     ]
 )
+
+STREAM_BATCH_RESULTS: list[dict[str, object]] = []
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,23 +113,97 @@ def parse_replay_messages(stream_df: DataFrame) -> DataFrame:
 def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
     """Append the current Kafka micro-batch to Bronze and refresh Silver and Gold."""
 
-    if batch_df.limit(1).count() == 0:
+    run_id = f"stream-batch-{batch_id:06d}"
+    started_at = utc_now_iso()
+    timer = stage_timer()
+    batch_count = batch_df.count()
+    if batch_count == 0:
         print(f"Skipping empty streaming batch {batch_id}")
+        STREAM_BATCH_RESULTS.append(
+            {
+                "run_id": run_id,
+                "status": "skipped",
+                "input_rows": 0,
+                "duration_seconds": stage_elapsed_seconds(timer),
+            }
+        )
         return
 
     spark = batch_df.sparkSession
-    bronze_batch = build_streaming_bronze_batch(batch_df, batch_run_id=f"stream-batch-{batch_id:06d}")
-    result = process_bronze_batch(
-        spark,
-        bronze_batch,
-        append_bronze=True,
-        bronze_partitions=4,
-        silver_partitions=4,
-    )
-    print(
-        f"Processed streaming batch {batch_id}: affected_dates={result['affected_dates']} "
-        f"gold_tables={sorted(result['gold_row_counts'])}"
-    )
+    bronze_batch = build_streaming_bronze_batch(batch_df, batch_run_id=run_id)
+    source_files = [row["source_file"] for row in batch_df.select("source_file").distinct().limit(10).collect()]
+    lag_stats = batch_df.select(
+        F.avg(
+            F.unix_timestamp("kafka_timestamp") - F.unix_timestamp(F.to_timestamp("replayed_at"))
+        ).alias("avg_freshness_lag_seconds"),
+        F.max(
+            F.unix_timestamp("kafka_timestamp") - F.unix_timestamp(F.to_timestamp("replayed_at"))
+        ).alias("max_freshness_lag_seconds"),
+    ).collect()[0]
+
+    try:
+        result = process_bronze_batch(
+            spark,
+            bronze_batch,
+            append_bronze=True,
+            bronze_partitions=4,
+            silver_partitions=4,
+            run_id=run_id,
+            input_descriptions=source_files,
+        )
+        microbatch_metrics = {
+            "input_rows": batch_count,
+            "affected_dates": len(result["affected_dates"]),
+            "silver_rows_written": result["silver_metrics"]["rows_written"],
+            "gold_rows_written": result["gold_metrics"]["rows_written"],
+            "avg_freshness_lag_seconds": float(lag_stats["avg_freshness_lag_seconds"] or 0.0),
+            "max_freshness_lag_seconds": float(lag_stats["max_freshness_lag_seconds"] or 0.0),
+            "duration_seconds": stage_elapsed_seconds(timer),
+        }
+        record_stage_event(
+            "streaming_microbatch_iceberg",
+            run_id,
+            status="succeeded",
+            metrics=microbatch_metrics,
+            details={"affected_dates": result["affected_dates"]},
+            inputs=source_files,
+            outputs=["lakehouse.demo.bronze_events", "lakehouse.demo.silver_events"],
+            started_at=started_at,
+        )
+        STREAM_BATCH_RESULTS.append(
+            {
+                "run_id": run_id,
+                "status": "succeeded",
+                **microbatch_metrics,
+            }
+        )
+        print(
+            f"Processed streaming batch {batch_id}: affected_dates={result['affected_dates']} "
+            f"gold_tables={sorted(result['gold_row_counts'])}"
+        )
+    except Exception as exc:
+        microbatch_metrics = {
+            "input_rows": batch_count,
+            "duration_seconds": stage_elapsed_seconds(timer),
+        }
+        record_stage_event(
+            "streaming_microbatch_iceberg",
+            run_id,
+            status="failed",
+            metrics=microbatch_metrics,
+            details={"failure": str(exc)},
+            inputs=source_files,
+            outputs=[],
+            started_at=started_at,
+        )
+        STREAM_BATCH_RESULTS.append(
+            {
+                "run_id": run_id,
+                "status": "failed",
+                **microbatch_metrics,
+            }
+        )
+        raise
 
 
 def main() -> None:
@@ -127,28 +212,74 @@ def main() -> None:
     args = parse_args()
     spark = build_spark_session()
     create_tables_if_needed(spark)
+    STREAM_BATCH_RESULTS.clear()
+    run_id = f"streaming-run-{args.topic.replace('.', '-')}-{args.timeout_seconds}"
+    started_at = utc_now_iso()
+    timer = stage_timer()
 
-    kafka_stream = (
-        spark.readStream.format("kafka")
-        .option("kafka.bootstrap.servers", args.bootstrap_servers)
-        .option("subscribe", args.topic)
-        .option("startingOffsets", args.starting_offsets)
-        .option("maxOffsetsPerTrigger", args.max_offsets_per_trigger)
-        .option("failOnDataLoss", "false")
-        .load()
-    )
+    try:
+        kafka_stream = (
+            spark.readStream.format("kafka")
+            .option("kafka.bootstrap.servers", args.bootstrap_servers)
+            .option("subscribe", args.topic)
+            .option("startingOffsets", args.starting_offsets)
+            .option("maxOffsetsPerTrigger", args.max_offsets_per_trigger)
+            .option("failOnDataLoss", "false")
+            .load()
+        )
 
-    parsed_stream = parse_replay_messages(kafka_stream)
-    query = (
-        parsed_stream.writeStream.foreachBatch(process_microbatch)
-        .option("checkpointLocation", args.checkpoint_location)
-        .trigger(processingTime=f"{args.trigger_seconds} seconds")
-        .start()
-    )
-    query.awaitTermination(args.timeout_seconds)
-    if query.isActive:
-        query.stop()
-    spark.stop()
+        parsed_stream = parse_replay_messages(kafka_stream)
+        query = (
+            parsed_stream.writeStream.foreachBatch(process_microbatch)
+            .option("checkpointLocation", args.checkpoint_location)
+            .trigger(processingTime=f"{args.trigger_seconds} seconds")
+            .start()
+        )
+        query.awaitTermination(args.timeout_seconds)
+        if query.isActive:
+            query.stop()
+
+        record_stage_event(
+            "streaming_run_iceberg",
+            run_id,
+            status="succeeded",
+            metrics={
+                "microbatches_processed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "succeeded"]),
+                "microbatches_failed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "failed"]),
+                "rows_read": sum(int(row.get("input_rows", 0)) for row in STREAM_BATCH_RESULTS),
+                "silver_rows_written": sum(int(row.get("silver_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
+                "gold_rows_written": sum(int(row.get("gold_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
+                "duration_seconds": stage_elapsed_seconds(timer),
+            },
+            details={
+                "topic": args.topic,
+                "checkpoint_location": args.checkpoint_location,
+                "microbatches": STREAM_BATCH_RESULTS,
+            },
+            outputs=["lakehouse.demo.bronze_events", "lakehouse.demo.silver_events"],
+            started_at=started_at,
+        )
+    except Exception as exc:
+        record_stage_event(
+            "streaming_run_iceberg",
+            run_id,
+            status="failed",
+            metrics={
+                "microbatches_processed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "succeeded"]),
+                "microbatches_failed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "failed"]),
+                "duration_seconds": stage_elapsed_seconds(timer),
+            },
+            details={
+                "topic": args.topic,
+                "checkpoint_location": args.checkpoint_location,
+                "failure": str(exc),
+                "microbatches": STREAM_BATCH_RESULTS,
+            },
+            started_at=started_at,
+        )
+        raise
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":

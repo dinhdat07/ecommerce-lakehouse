@@ -6,6 +6,7 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
 
 - Phase 1 batch backfill for `2019-10` to `2020-02` into physical Bronze, Silver, and Gold Iceberg tables
 - Phase 2 bounded streaming demo for `2020-03` to `2020-04` using Kafka replay and Spark Structured Streaming
+- Phase 3 production-like hardening with DQ gates, stage manifests, structured pipeline metrics, and benchmark tooling
 - Canonical Silver materialization with normalization, null handling, and deduplication
 - Gold Iceberg tables for revenue, product ranking, funnel, category, session, and user-path analytics
 - Trino as the query layer over Iceberg tables
@@ -121,7 +122,19 @@ docker exec -i ecommerce-lakehouse-laptop-trino-1 trino < infra/trino/sql/valida
 
 The streaming path is bounded by sample size, Kafka replay batch size, Spark timeout, and a container-local checkpoint directory on the Spark work volume so it stays safe on laptop/WSL environments.
 
-Outputs are written under `data/lakehouse/` by default. Run metadata is stored in `data/manifests/`.
+Spark/Iceberg runs now emit stage manifests under `data/manifests/` and optional structured metrics JSON lines through `PIPELINE_METRICS_LOG_PATH`.
+
+To run the Phase 3 benchmark suite in Docker:
+
+```bash
+bash infra/scripts/run-phase3-benchmarks.sh
+```
+
+By default this uses demo mode when `data/raw/` does not contain the full historical range. To force the full benchmark on an external raw-data mount:
+
+```bash
+BENCH_MODE=full BENCH_INPUT_DIR=/workspace/data/raw bash infra/scripts/run-phase3-benchmarks.sh
+```
 
 ## Key Documentation
 
@@ -129,6 +142,8 @@ Outputs are written under `data/lakehouse/` by default. Run metadata is stored i
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts and bounded Phase 2 refresh model
 - `docs/gap_analysis.md`: current implementation status and remaining gaps
+- `docs/monitoring_runbook.md`: DQ, manifests, metrics, recovery, and troubleshooting
+- `docs/benchmarking.md`: Phase 3 benchmark modes, commands, and outputs
 - `docs/local_setup.md`: local setup, sample data, and test commands
 - `docs/docker_laptop_stack.md`: laptop-friendly Docker Compose multi-node simulation
 - `docs/multi_node_readiness.md`: scaling path and shared-storage assumptions

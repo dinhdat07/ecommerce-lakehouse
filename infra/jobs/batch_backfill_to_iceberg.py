@@ -11,16 +11,24 @@ from __future__ import annotations
 import argparse
 import calendar
 import re
+import sys
 from datetime import date
 from pathlib import Path
 
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
-    from dq_iceberg import assert_gold_dataframe_non_negative, assert_silver_dataframe_quality
+    from dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality
 except ImportError:  # pragma: no cover - alternate import when running as a package
-    from infra.jobs.dq_iceberg import assert_gold_dataframe_non_negative, assert_silver_dataframe_quality
+    from infra.jobs.dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality
+
+from common.observability import record_stage_event, stage_elapsed_seconds, stage_timer  # noqa: E402
+from common.runtime import utc_now_iso  # noqa: E402
 
 CATALOG = "lakehouse"
 SCHEMA = "demo"
@@ -458,33 +466,40 @@ def parse_event_timestamp(column_name: str) -> F.Column:
     )
 
 
-def build_silver_candidates(bronze_batch: DataFrame) -> DataFrame:
-    """Normalize Bronze rows into dedupable Silver candidates."""
+def build_silver_base_rows(bronze_batch: DataFrame) -> DataFrame:
+    """Normalize Bronze rows into Silver-shaped records before deduplication."""
 
     parsed_event_time = parse_event_timestamp("event_time")
     normalized_event_type = normalize_nullable_text("event_type")
-    canonical_event_time = F.date_format(parsed_event_time, "yyyy-MM-dd'T'HH:mm:ss'Z'")
 
+    return bronze_batch.select(
+        F.col("record_hash").alias("event_id"),
+        F.col("batch_run_id"),
+        F.col("ingested_at"),
+        F.col("source_file"),
+        F.col("source_month"),
+        F.col("record_hash"),
+        normalize_nullable_text("event_time").alias("_raw_event_time"),
+        normalize_nullable_text("event_type").alias("_raw_event_type"),
+        parsed_event_time.alias("event_time"),
+        F.to_date(parsed_event_time).alias("event_date"),
+        F.lower(normalized_event_type).alias("event_type"),
+        normalize_nullable_text("product_id").cast("bigint").alias("product_id"),
+        normalize_nullable_text("category_id").cast("bigint").alias("category_id"),
+        F.lower(normalize_nullable_text("category_code")).alias("category_code"),
+        normalize_nullable_text("brand").alias("brand"),
+        normalize_nullable_text("price").cast("double").alias("price"),
+        normalize_nullable_text("user_id").cast("bigint").alias("user_id"),
+        normalize_nullable_text("user_session").alias("user_session"),
+    )
+
+
+def deduplicate_silver_candidates(silver_base_rows: DataFrame) -> DataFrame:
+    """Return canonical Silver candidates with deterministic deduplication applied."""
+
+    canonical_event_time = F.date_format(F.col("event_time"), "yyyy-MM-dd'T'HH:mm:ss'Z'")
     candidates = (
-        bronze_batch.select(
-            F.col("record_hash").alias("event_id"),
-            F.col("batch_run_id"),
-            F.col("ingested_at"),
-            F.col("source_file"),
-            F.col("source_month"),
-            F.col("record_hash"),
-            parsed_event_time.alias("event_time"),
-            F.to_date(parsed_event_time).alias("event_date"),
-            F.lower(normalized_event_type).alias("event_type"),
-            normalize_nullable_text("product_id").cast("bigint").alias("product_id"),
-            normalize_nullable_text("category_id").cast("bigint").alias("category_id"),
-            F.lower(normalize_nullable_text("category_code")).alias("category_code"),
-            normalize_nullable_text("brand").alias("brand"),
-            normalize_nullable_text("price").cast("double").alias("price"),
-            normalize_nullable_text("user_id").cast("bigint").alias("user_id"),
-            normalize_nullable_text("user_session").alias("user_session"),
-        )
-        .where(F.col("event_time").isNotNull() & F.col("event_type").isNotNull())
+        silver_base_rows.where(F.col("event_time").isNotNull() & F.col("event_type").isNotNull())
         .withColumn(
             "dedupe_key",
             F.sha2(
@@ -504,13 +519,19 @@ def build_silver_candidates(bronze_batch: DataFrame) -> DataFrame:
             ),
         )
     )
-
     dedupe_window = Window.partitionBy("dedupe_key").orderBy(F.col("event_time").asc(), F.col("record_hash").asc())
     return (
         candidates.withColumn("row_num", F.row_number().over(dedupe_window))
         .where(F.col("row_num") == 1)
         .drop("row_num")
+        .drop("_raw_event_time", "_raw_event_type")
     )
+
+
+def build_silver_candidates(bronze_batch: DataFrame) -> DataFrame:
+    """Normalize Bronze rows into dedupable Silver candidates."""
+
+    return deduplicate_silver_candidates(build_silver_base_rows(bronze_batch))
 
 
 def insert_new_silver_rows(spark: SparkSession, silver_candidates: DataFrame) -> DataFrame:
@@ -792,11 +813,11 @@ def delete_affected_partitions(spark: SparkSession, table_name: str, affected_da
     spark.sql(f"DELETE FROM {table_name} WHERE event_date IN ({date_literals})")
 
 
-def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[str, int]:
+def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[str, object]:
     """Recompute Gold tables only for dates touched by newly inserted Silver rows."""
 
     if not affected_dates:
-        return {}
+        return {"row_counts": {}, "dq_summaries": {}, "tables_written": 0}
 
     silver_slice = spark.table(SILVER_TABLE).where(F.col("event_date").cast("string").isin(affected_dates))
     sessionized = build_sessionized_events(silver_slice)
@@ -811,6 +832,7 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
     }
 
     row_counts: dict[str, int] = {}
+    dq_summaries: dict[str, dict[str, object]] = {}
     gold_dq_specs: dict[str, tuple[str, tuple[str, ...]]] = {
         GOLD_DAILY_REVENUE: ("daily_revenue", ("purchase_count", "purchase_revenue", "unique_buyers")),
         GOLD_TOP_PRODUCTS: ("top_products", ("views", "carts", "purchases", "purchase_revenue", "unique_users")),
@@ -829,15 +851,24 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
         ),
     }
     for table_name, dataframe in gold_tables.items():
-        if dataframe.limit(1).count() > 0:
-            spec = gold_dq_specs.get(table_name)
-            if spec:
-                short_name, cols = spec
-                assert_gold_dataframe_non_negative(dataframe, name=short_name, columns=cols)
+        row_count = dataframe.count()
+        spec = gold_dq_specs.get(table_name)
+        if spec:
+            short_name, cols = spec
+            dq_summaries[short_name] = summarize_gold_dataframe_quality(
+                dataframe,
+                name=short_name,
+                columns=cols,
+            )
         delete_affected_partitions(spark, table_name, affected_dates)
-        append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
-        row_counts[table_name] = -1
-    return row_counts
+        if row_count > 0:
+            append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
+        row_counts[table_name] = row_count
+    return {
+        "row_counts": row_counts,
+        "dq_summaries": dq_summaries,
+        "tables_written": sum(1 for count in row_counts.values() if count > 0),
+    }
 
 
 def process_bronze_batch(
@@ -847,24 +878,177 @@ def process_bronze_batch(
     append_bronze: bool,
     bronze_partitions: int = 8,
     silver_partitions: int = 8,
+    run_id: str | None = None,
+    input_descriptions: list[str] | None = None,
 ) -> dict[str, object]:
     """Process a Bronze DataFrame through Silver and Gold using the shared Phase 1 logic."""
 
-    if append_bronze:
-        new_bronze_rows = insert_new_bronze_rows(spark, bronze_batch)
-        append_to_iceberg(BRONZE_TABLE, new_bronze_rows, partitions=bronze_partitions)
+    bronze_inputs = list(input_descriptions or [])
+    bronze_rows_seen = bronze_batch.count()
 
-    silver_candidates = build_silver_candidates(bronze_batch)
-    inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
-    if inserted_silver_rows.limit(1).count() > 0:
-        assert_silver_dataframe_quality(inserted_silver_rows)
-    affected_dates = sorted(str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect())
-    if affected_dates:
-        append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=silver_partitions)
-    gold_row_counts = refresh_gold_tables(spark, affected_dates)
+    bronze_started_at = utc_now_iso()
+    bronze_timer = stage_timer()
+    try:
+        if append_bronze:
+            new_bronze_rows = insert_new_bronze_rows(spark, bronze_batch)
+            bronze_rows_written = new_bronze_rows.count()
+            if bronze_rows_written > 0:
+                append_to_iceberg(BRONZE_TABLE, new_bronze_rows, partitions=bronze_partitions)
+        else:
+            bronze_rows_written = 0
+
+        bronze_metrics = {
+            "rows_seen": bronze_rows_seen,
+            "rows_written": bronze_rows_written,
+            "rows_skipped_existing": max(bronze_rows_seen - bronze_rows_written, 0),
+            "duration_seconds": stage_elapsed_seconds(bronze_timer),
+        }
+        if run_id is not None:
+            record_stage_event(
+                "bronze_ingest_iceberg",
+                run_id,
+                status="succeeded",
+                metrics=bronze_metrics,
+                details={"append_enabled": append_bronze},
+                inputs=bronze_inputs,
+                outputs=[BRONZE_TABLE],
+                started_at=bronze_started_at,
+            )
+    except Exception as exc:
+        bronze_metrics = {
+            "rows_seen": bronze_rows_seen,
+            "duration_seconds": stage_elapsed_seconds(bronze_timer),
+        }
+        if run_id is not None:
+            record_stage_event(
+                "bronze_ingest_iceberg",
+                run_id,
+                status="failed",
+                metrics=bronze_metrics,
+                details={"append_enabled": append_bronze, "failure": str(exc)},
+                inputs=bronze_inputs,
+                outputs=[BRONZE_TABLE],
+                started_at=bronze_started_at,
+            )
+        raise
+
+    silver_started_at = utc_now_iso()
+    silver_timer = stage_timer()
+    try:
+        silver_base_rows = build_silver_base_rows(bronze_batch)
+        silver_candidates = deduplicate_silver_candidates(silver_base_rows)
+        inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
+        silver_candidates_count = silver_candidates.count()
+        silver_rows_written = inserted_silver_rows.count()
+        silver_dq_summary = summarize_silver_dataframe_quality(
+            silver_base_rows,
+            inserted_silver_rows,
+        )
+        affected_dates = sorted(
+            str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect()
+        )
+        if affected_dates:
+            append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=silver_partitions)
+        silver_metrics = {
+            "rows_seen": bronze_rows_seen,
+            "rows_valid_after_cleaning": silver_candidates_count,
+            "rows_written": silver_rows_written,
+            "rows_skipped_existing": max(silver_candidates_count - silver_rows_written, 0),
+            "affected_dates": len(affected_dates),
+            "duration_seconds": stage_elapsed_seconds(silver_timer),
+            **silver_dq_summary,
+        }
+        if run_id is not None:
+            record_stage_event(
+                "silver_publish_iceberg",
+                run_id,
+                status="succeeded",
+                metrics=silver_metrics,
+                details={
+                    "affected_dates": affected_dates,
+                    "bad_record_samples": silver_dq_summary.get("bad_record_samples", {}),
+                },
+                inputs=[BRONZE_TABLE],
+                outputs=[SILVER_TABLE],
+                started_at=silver_started_at,
+            )
+    except Exception as exc:
+        if run_id is not None:
+            record_stage_event(
+                "silver_publish_iceberg",
+                run_id,
+                status="failed",
+                metrics={"rows_seen": bronze_rows_seen, "duration_seconds": stage_elapsed_seconds(silver_timer)},
+                details={"failure": str(exc)},
+                inputs=[BRONZE_TABLE],
+                outputs=[SILVER_TABLE],
+                started_at=silver_started_at,
+            )
+        raise
+
+    gold_started_at = utc_now_iso()
+    gold_timer = stage_timer()
+    try:
+        gold_result = refresh_gold_tables(spark, affected_dates)
+        gold_row_counts = gold_result["row_counts"]
+        gold_dq_summaries = gold_result["dq_summaries"]
+        gold_metrics: dict[str, object] = {
+            "affected_dates": len(affected_dates),
+            "tables_written": gold_result["tables_written"],
+            "rows_written": sum(gold_row_counts.values()),
+            "duration_seconds": stage_elapsed_seconds(gold_timer),
+        }
+        gold_metrics["dq_passed"] = all(
+            bool(summary.get("dq_passed", True)) for summary in gold_dq_summaries.values()
+        )
+        for table_name, summary in gold_dq_summaries.items():
+            gold_metrics[f"{table_name}_rows_to_publish"] = summary.get(
+                f"gold_{table_name}_rows_to_publish",
+                0,
+            )
+            gold_metrics[f"{table_name}_negative_metric_rows"] = summary.get(
+                f"gold_{table_name}_negative_metric_rows",
+                0,
+            )
+        if run_id is not None:
+            record_stage_event(
+                "gold_refresh_iceberg",
+                run_id,
+                status="succeeded",
+                metrics=gold_metrics,
+                details={"affected_dates": affected_dates, "dq_tables": gold_dq_summaries},
+                inputs=[SILVER_TABLE],
+                outputs=list(gold_row_counts.keys()),
+                started_at=gold_started_at,
+            )
+    except Exception as exc:
+        if run_id is not None:
+            record_stage_event(
+                "gold_refresh_iceberg",
+                run_id,
+                status="failed",
+                metrics={"affected_dates": len(affected_dates), "duration_seconds": stage_elapsed_seconds(gold_timer)},
+                details={"failure": str(exc), "affected_dates": affected_dates},
+                inputs=[SILVER_TABLE],
+                outputs=[
+                    GOLD_DAILY_REVENUE,
+                    GOLD_TOP_PRODUCTS,
+                    GOLD_CONVERSION_FUNNEL,
+                    GOLD_CATEGORY_PERFORMANCE,
+                    GOLD_SESSION_FUNNEL,
+                    GOLD_USER_CONVERSION_PATH,
+                ],
+                started_at=gold_started_at,
+            )
+        raise
     return {
         "affected_dates": affected_dates,
         "gold_row_counts": gold_row_counts,
+        "gold_dq_summaries": gold_dq_summaries,
+        "silver_dq_summary": silver_dq_summary,
+        "bronze_metrics": bronze_metrics,
+        "silver_metrics": silver_metrics,
+        "gold_metrics": gold_metrics,
     }
 
 
@@ -873,47 +1057,93 @@ def main() -> None:
 
     args = parse_args()
     spark = build_spark_session()
-    drop_tables_if_requested(spark, args.reset_tables)
-    create_tables_if_needed(spark)
-
-    input_dir = Path(args.input_dir)
-    if args.input_file:
-        input_files = [Path(args.input_file)]
-        missing_months: list[str] = []
-    else:
-        input_files, missing_months = discover_input_files(input_dir, args.start_month, args.end_month)
-
-    if args.resume_from == "full" and not input_files:
-        raise SystemExit(f"No historical files found in {input_dir} for range {args.start_month}..{args.end_month}")
-
     batch_run_id = f"batch-{args.start_month.replace('-', '')}-{args.end_month.replace('-', '')}"
-    if args.resume_from == "silver":
-        bronze_batch = read_bronze_slice(spark, args.start_month, args.end_month)
-    else:
-        bronze_batch = read_bronze_batch(spark, input_files, batch_run_id, source_month_override=args.source_month)
-    process_result = process_bronze_batch(
-        spark,
-        bronze_batch,
-        append_bronze=args.resume_from != "silver",
-        bronze_partitions=8,
-        silver_partitions=8,
-    )
-    affected_dates = process_result["affected_dates"]
-    gold_row_counts = process_result["gold_row_counts"]
+    overall_started_at = utc_now_iso()
+    overall_timer = stage_timer()
 
-    print("Historical batch backfill complete.")
-    print(f"Resume mode: {args.resume_from}")
-    print(f"Input files: {[path.name for path in input_files]}")
-    if missing_months:
-        print(f"Missing months in requested range: {missing_months}")
-    print(f"Affected Gold dates: {affected_dates}")
-    print("Gold tables refreshed:")
-    for table_name, row_count in sorted(gold_row_counts.items()):
-        if row_count >= 0:
-            print(f" - {table_name}: {row_count} rows")
+    try:
+        drop_tables_if_requested(spark, args.reset_tables)
+        create_tables_if_needed(spark)
+
+        input_dir = Path(args.input_dir)
+        if args.input_file:
+            input_files = [Path(args.input_file)]
+            missing_months: list[str] = []
         else:
-            print(f" - {table_name}")
-    spark.stop()
+            input_files, missing_months = discover_input_files(input_dir, args.start_month, args.end_month)
+
+        if args.resume_from == "full" and not input_files:
+            raise SystemExit(f"No historical files found in {input_dir} for range {args.start_month}..{args.end_month}")
+
+        if args.resume_from == "silver":
+            bronze_batch = read_bronze_slice(spark, args.start_month, args.end_month)
+        else:
+            bronze_batch = read_bronze_batch(spark, input_files, batch_run_id, source_month_override=args.source_month)
+
+        process_result = process_bronze_batch(
+            spark,
+            bronze_batch,
+            append_bronze=args.resume_from != "silver",
+            bronze_partitions=8,
+            silver_partitions=8,
+            run_id=batch_run_id,
+            input_descriptions=[str(path) for path in input_files],
+        )
+        affected_dates = process_result["affected_dates"]
+        gold_row_counts = process_result["gold_row_counts"]
+
+        record_stage_event(
+            "batch_backfill_iceberg",
+            batch_run_id,
+            status="succeeded",
+            metrics={
+                "duration_seconds": stage_elapsed_seconds(overall_timer),
+                "affected_dates": len(affected_dates),
+                "gold_tables_refreshed": len(gold_row_counts),
+                "bronze_rows_written": process_result["bronze_metrics"]["rows_written"],
+                "silver_rows_written": process_result["silver_metrics"]["rows_written"],
+                "gold_rows_written": process_result["gold_metrics"]["rows_written"],
+            },
+            details={
+                "resume_from": args.resume_from,
+                "missing_months": missing_months,
+                "affected_dates": affected_dates,
+            },
+            inputs=[str(path) for path in input_files],
+            outputs=[
+                BRONZE_TABLE,
+                SILVER_TABLE,
+                GOLD_DAILY_REVENUE,
+                GOLD_TOP_PRODUCTS,
+                GOLD_CONVERSION_FUNNEL,
+                GOLD_CATEGORY_PERFORMANCE,
+                GOLD_SESSION_FUNNEL,
+                GOLD_USER_CONVERSION_PATH,
+            ],
+            started_at=overall_started_at,
+        )
+
+        print("Historical batch backfill complete.")
+        print(f"Resume mode: {args.resume_from}")
+        print(f"Input files: {[path.name for path in input_files]}")
+        if missing_months:
+            print(f"Missing months in requested range: {missing_months}")
+        print(f"Affected Gold dates: {affected_dates}")
+        print("Gold tables refreshed:")
+        for table_name, row_count in sorted(gold_row_counts.items()):
+            print(f" - {table_name}: {row_count} rows")
+    except Exception as exc:
+        record_stage_event(
+            "batch_backfill_iceberg",
+            batch_run_id,
+            status="failed",
+            metrics={"duration_seconds": stage_elapsed_seconds(overall_timer)},
+            details={"resume_from": args.resume_from, "failure": str(exc)},
+            started_at=overall_started_at,
+        )
+        raise
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":
