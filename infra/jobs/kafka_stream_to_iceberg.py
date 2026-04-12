@@ -1,15 +1,18 @@
-"""Kafka to Iceberg Structured Streaming job for the Phase 2 demo path.
+"""Kafka to Iceberg Structured Streaming job for demo and server modes.
 
-This job reads bounded demo replay events from Kafka, appends physical Bronze
-rows to Iceberg, and incrementally refreshes Silver and Gold inside
-`foreachBatch` using the same Spark transformations as the Phase 1 batch path.
+This job reads Kafka replay events, appends physical Bronze rows to Iceberg,
+and incrementally refreshes Silver and Gold inside ``foreachBatch`` using the
+same Spark transformations as the Phase 1 batch path.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -26,6 +29,23 @@ from batch_backfill_to_iceberg import (  # noqa: E402
     build_streaming_bronze_batch,
     create_tables_if_needed,
     process_bronze_batch,
+)
+from common.constants import (  # noqa: E402
+    KAFKA_BOOTSTRAP_SERVERS,
+    KAFKA_TOPIC_EVENTS,
+    SPARK_APP_NAME_PREFIX,
+    SPARK_SQL_SHUFFLE_PARTITIONS,
+    STREAM_CHECKPOINT_LOCATION,
+    STREAM_FAIL_ON_DATA_LOSS,
+    STREAM_MAX_OFFSETS_PER_TRIGGER,
+    STREAM_MODE,
+    STREAM_PROGRESS_LOG_PATH,
+    STREAM_PROGRESS_POLL_SECONDS,
+    STREAM_QUERY_NAME,
+    STREAM_STARTING_OFFSETS,
+    STREAM_STOP_AFTER_SECONDS,
+    STREAM_TIMEOUT_SECONDS,
+    STREAM_TRIGGER_SECONDS,
 )
 from common.observability import record_stage_event, stage_elapsed_seconds, stage_timer  # noqa: E402
 from common.runtime import utc_now_iso  # noqa: E402
@@ -56,32 +76,73 @@ REPLAY_MESSAGE_SCHEMA = StructType(
 )
 
 STREAM_BATCH_RESULTS: list[dict[str, object]] = []
+STREAM_JOB_ARGS: argparse.Namespace | None = None
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for the bounded streaming demo job."""
+    """Parse CLI arguments for demo and server streaming execution."""
 
-    parser = argparse.ArgumentParser(description="Read Kafka replay events and refresh Bronze, Silver, and Gold.")
-    parser.add_argument("--bootstrap-servers", default="kafka:29092", help="Kafka bootstrap servers reachable from Spark.")
-    parser.add_argument("--topic", default="ecom.events", help="Kafka topic to consume.")
+    parser = argparse.ArgumentParser(description="Read Kafka events and refresh Bronze, Silver, and Gold.")
+    parser.add_argument("--mode", choices=["demo", "server"], default=STREAM_MODE, help="Streaming operating mode.")
+    parser.add_argument("--bootstrap-servers", default=KAFKA_BOOTSTRAP_SERVERS, help="Kafka bootstrap servers reachable from Spark.")
+    parser.add_argument("--topic", default=KAFKA_TOPIC_EVENTS, help="Kafka topic to consume.")
+    parser.add_argument("--query-name", default=STREAM_QUERY_NAME, help="Stable structured-streaming query name.")
     parser.add_argument(
         "--checkpoint-location",
-        default="/opt/spark/work-dir/checkpoints/phase2/kafka_to_iceberg",
+        default=STREAM_CHECKPOINT_LOCATION,
         help="Streaming checkpoint directory.",
     )
-    parser.add_argument("--starting-offsets", default="earliest", help="Kafka startingOffsets setting.")
-    parser.add_argument("--max-offsets-per-trigger", type=int, default=2000, help="Max Kafka records per micro-batch.")
-    parser.add_argument("--trigger-seconds", type=int, default=5, help="Processing time trigger in seconds.")
-    parser.add_argument("--timeout-seconds", type=int, default=120, help="Maximum runtime before the query stops.")
+    parser.add_argument(
+        "--progress-log-path",
+        default=STREAM_PROGRESS_LOG_PATH,
+        help="Optional JSONL file for periodic progress snapshots.",
+    )
+    parser.add_argument("--starting-offsets", default=STREAM_STARTING_OFFSETS, help="Kafka startingOffsets setting.")
+    parser.add_argument(
+        "--max-offsets-per-trigger",
+        type=int,
+        default=STREAM_MAX_OFFSETS_PER_TRIGGER,
+        help="Max Kafka records per micro-batch. Set 0 to disable the option.",
+    )
+    parser.add_argument("--trigger-seconds", type=int, default=STREAM_TRIGGER_SECONDS, help="Processing time trigger in seconds.")
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=STREAM_TIMEOUT_SECONDS,
+        help="Max runtime before the query stops. Use 0 for indefinite execution.",
+    )
+    parser.add_argument(
+        "--stop-after-seconds",
+        type=int,
+        default=STREAM_STOP_AFTER_SECONDS,
+        help="Optional graceful stop deadline independent of timeout. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--progress-poll-seconds",
+        type=int,
+        default=STREAM_PROGRESS_POLL_SECONDS,
+        help="How often to inspect and emit query progress.",
+    )
+    parser.add_argument(
+        "--fail-on-data-loss",
+        default="true" if STREAM_FAIL_ON_DATA_LOSS else "false",
+        help="Kafka failOnDataLoss setting: true or false.",
+    )
+    parser.add_argument("--bronze-partitions", type=int, default=4, help="Bronze append repartition count.")
+    parser.add_argument("--silver-partitions", type=int, default=4, help="Silver append repartition count.")
     return parser.parse_args()
 
 
-def build_spark_session() -> SparkSession:
-    """Create the Spark session used for the streaming demo."""
+def build_spark_session(app_name: str | None = None) -> SparkSession:
+    """Create the Spark session used for the streaming job."""
 
-    spark = SparkSession.builder.appName("kafka-stream-to-iceberg").getOrCreate()
+    spark = SparkSession.builder.appName(app_name or f"{SPARK_APP_NAME_PREFIX}-streaming").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
-    spark.conf.set("spark.sql.shuffle.partitions", "8")
+    spark.conf.set("spark.sql.shuffle.partitions", str(SPARK_SQL_SHUFFLE_PARTITIONS))
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
     return spark
 
@@ -110,15 +171,38 @@ def parse_replay_messages(stream_df: DataFrame) -> DataFrame:
     )
 
 
+def _write_json_line(path_value: str, payload: dict[str, Any]) -> None:
+    if not path_value:
+        return
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _batch_outputs() -> list[str]:
+    return [
+        "lakehouse.demo.bronze_events",
+        "lakehouse.demo.silver_events",
+        "lakehouse.demo.daily_revenue",
+        "lakehouse.demo.top_products",
+        "lakehouse.demo.conversion_funnel_daily",
+        "lakehouse.demo.category_performance_daily",
+        "lakehouse.demo.session_funnel",
+        "lakehouse.demo.user_conversion_path",
+    ]
+
+
 def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
     """Append the current Kafka micro-batch to Bronze and refresh Silver and Gold."""
 
-    run_id = f"stream-batch-{batch_id:06d}"
+    assert STREAM_JOB_ARGS is not None
+
+    run_id = f"{STREAM_JOB_ARGS.query_name}-batch-{batch_id:06d}"
     started_at = utc_now_iso()
     timer = stage_timer()
     batch_count = batch_df.count()
     if batch_count == 0:
-        print(f"Skipping empty streaming batch {batch_id}")
         STREAM_BATCH_RESULTS.append(
             {
                 "run_id": run_id,
@@ -146,8 +230,8 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
             spark,
             bronze_batch,
             append_bronze=True,
-            bronze_partitions=4,
-            silver_partitions=4,
+            bronze_partitions=STREAM_JOB_ARGS.bronze_partitions,
+            silver_partitions=STREAM_JOB_ARGS.silver_partitions,
             run_id=run_id,
             input_descriptions=source_files,
         )
@@ -165,9 +249,9 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
             run_id,
             status="succeeded",
             metrics=microbatch_metrics,
-            details={"affected_dates": result["affected_dates"]},
+            details={"affected_dates": result["affected_dates"], "mode": STREAM_JOB_ARGS.mode},
             inputs=source_files,
-            outputs=["lakehouse.demo.bronze_events", "lakehouse.demo.silver_events"],
+            outputs=_batch_outputs(),
             started_at=started_at,
         )
         STREAM_BATCH_RESULTS.append(
@@ -176,6 +260,17 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
                 "status": "succeeded",
                 **microbatch_metrics,
             }
+        )
+        _write_json_line(
+            STREAM_JOB_ARGS.progress_log_path,
+            {
+                "type": "streaming_microbatch",
+                "run_id": run_id,
+                "batch_id": batch_id,
+                "mode": STREAM_JOB_ARGS.mode,
+                "metrics": microbatch_metrics,
+                "affected_dates": result["affected_dates"],
+            },
         )
         print(
             f"Processed streaming batch {batch_id}: affected_dates={result['affected_dates']} "
@@ -191,7 +286,7 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
             run_id,
             status="failed",
             metrics=microbatch_metrics,
-            details={"failure": str(exc)},
+            details={"failure": str(exc), "mode": STREAM_JOB_ARGS.mode},
             inputs=source_files,
             outputs=[],
             started_at=started_at,
@@ -203,17 +298,97 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
                 **microbatch_metrics,
             }
         )
+        _write_json_line(
+            STREAM_JOB_ARGS.progress_log_path,
+            {
+                "type": "streaming_microbatch_failed",
+                "run_id": run_id,
+                "batch_id": batch_id,
+                "mode": STREAM_JOB_ARGS.mode,
+                "error": str(exc),
+                "metrics": microbatch_metrics,
+            },
+        )
         raise
 
 
+def _emit_query_progress(query, *, run_id: str, progress_log_path: str, last_progress_id: int | None) -> int | None:
+    recent = query.recentProgress
+    if not recent:
+        return last_progress_id
+
+    newest = recent[-1]
+    progress_id = int(newest.get("batchId", -1))
+    if last_progress_id is not None and progress_id <= last_progress_id:
+        return last_progress_id
+
+    _write_json_line(
+        progress_log_path,
+        {
+            "type": "streaming_query_progress",
+            "run_id": run_id,
+            "progress": newest,
+        },
+    )
+    return progress_id
+
+
+def _final_run_metrics() -> dict[str, Any]:
+    return {
+        "microbatches_processed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "succeeded"]),
+        "microbatches_failed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "failed"]),
+        "microbatches_skipped": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "skipped"]),
+        "rows_read": sum(int(row.get("input_rows", 0)) for row in STREAM_BATCH_RESULTS),
+        "silver_rows_written": sum(int(row.get("silver_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
+        "gold_rows_written": sum(int(row.get("gold_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
+    }
+
+
+def _wait_for_query(query, args: argparse.Namespace, *, run_id: str) -> str:
+    poll_seconds = max(args.progress_poll_seconds, 1)
+    timeout_deadline = time.time() + args.timeout_seconds if args.timeout_seconds > 0 else None
+    stop_deadline = time.time() + args.stop_after_seconds if args.stop_after_seconds > 0 else None
+    last_progress_id: int | None = None
+
+    while query.isActive:
+        now = time.time()
+        wait_seconds = poll_seconds
+        if timeout_deadline is not None:
+            wait_seconds = min(wait_seconds, max(timeout_deadline - now, 0.0))
+        if stop_deadline is not None:
+            wait_seconds = min(wait_seconds, max(stop_deadline - now, 0.0))
+        if wait_seconds <= 0:
+            break
+
+        query.awaitTermination(wait_seconds)
+        last_progress_id = _emit_query_progress(
+            query,
+            run_id=run_id,
+            progress_log_path=args.progress_log_path,
+            last_progress_id=last_progress_id,
+        )
+
+        if timeout_deadline is not None and time.time() >= timeout_deadline and query.isActive:
+            query.stop()
+            return "timeout"
+        if stop_deadline is not None and time.time() >= stop_deadline and query.isActive:
+            query.stop()
+            return "stop_after"
+
+    return "completed"
+
+
 def main() -> None:
-    """Run the bounded Structured Streaming demo job."""
+    """Run the Structured Streaming job in demo or server mode."""
+
+    global STREAM_JOB_ARGS
 
     args = parse_args()
-    spark = build_spark_session()
+    STREAM_JOB_ARGS = args
+    spark = build_spark_session(app_name=f"{SPARK_APP_NAME_PREFIX}-{args.mode}-streaming")
     create_tables_if_needed(spark)
     STREAM_BATCH_RESULTS.clear()
-    run_id = f"streaming-run-{args.topic.replace('.', '-')}-{args.timeout_seconds}"
+    run_id = f"{args.query_name}-{utc_now_iso().replace(':', '').replace('-', '')}"
     started_at = utc_now_iso()
     timer = stage_timer()
 
@@ -223,41 +398,52 @@ def main() -> None:
             .option("kafka.bootstrap.servers", args.bootstrap_servers)
             .option("subscribe", args.topic)
             .option("startingOffsets", args.starting_offsets)
-            .option("maxOffsetsPerTrigger", args.max_offsets_per_trigger)
-            .option("failOnDataLoss", "false")
-            .load()
+            .option("failOnDataLoss", "true" if _parse_bool(args.fail_on_data_loss) else "false")
         )
+        if args.max_offsets_per_trigger > 0:
+            kafka_stream = kafka_stream.option("maxOffsetsPerTrigger", args.max_offsets_per_trigger)
 
-        parsed_stream = parse_replay_messages(kafka_stream)
+        parsed_stream = parse_replay_messages(kafka_stream.load())
         query = (
             parsed_stream.writeStream.foreachBatch(process_microbatch)
+            .queryName(args.query_name)
             .option("checkpointLocation", args.checkpoint_location)
             .trigger(processingTime=f"{args.trigger_seconds} seconds")
             .start()
         )
-        query.awaitTermination(args.timeout_seconds)
+        stop_reason = _wait_for_query(query, args, run_id=run_id)
         if query.isActive:
             query.stop()
 
+        run_metrics = {
+            **_final_run_metrics(),
+            "duration_seconds": stage_elapsed_seconds(timer),
+        }
         record_stage_event(
             "streaming_run_iceberg",
             run_id,
             status="succeeded",
-            metrics={
-                "microbatches_processed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "succeeded"]),
-                "microbatches_failed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "failed"]),
-                "rows_read": sum(int(row.get("input_rows", 0)) for row in STREAM_BATCH_RESULTS),
-                "silver_rows_written": sum(int(row.get("silver_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
-                "gold_rows_written": sum(int(row.get("gold_rows_written", 0)) for row in STREAM_BATCH_RESULTS),
-                "duration_seconds": stage_elapsed_seconds(timer),
-            },
+            metrics=run_metrics,
             details={
                 "topic": args.topic,
+                "mode": args.mode,
+                "query_name": args.query_name,
                 "checkpoint_location": args.checkpoint_location,
+                "stop_reason": stop_reason,
                 "microbatches": STREAM_BATCH_RESULTS,
             },
-            outputs=["lakehouse.demo.bronze_events", "lakehouse.demo.silver_events"],
+            outputs=_batch_outputs(),
             started_at=started_at,
+        )
+        _write_json_line(
+            args.progress_log_path,
+            {
+                "type": "streaming_run_complete",
+                "run_id": run_id,
+                "mode": args.mode,
+                "stop_reason": stop_reason,
+                "metrics": run_metrics,
+            },
         )
     except Exception as exc:
         record_stage_event(
@@ -265,17 +451,27 @@ def main() -> None:
             run_id,
             status="failed",
             metrics={
-                "microbatches_processed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "succeeded"]),
-                "microbatches_failed": len([row for row in STREAM_BATCH_RESULTS if row["status"] == "failed"]),
+                **_final_run_metrics(),
                 "duration_seconds": stage_elapsed_seconds(timer),
             },
             details={
                 "topic": args.topic,
+                "mode": args.mode,
+                "query_name": args.query_name,
                 "checkpoint_location": args.checkpoint_location,
                 "failure": str(exc),
                 "microbatches": STREAM_BATCH_RESULTS,
             },
             started_at=started_at,
+        )
+        _write_json_line(
+            args.progress_log_path,
+            {
+                "type": "streaming_run_failed",
+                "run_id": run_id,
+                "mode": args.mode,
+                "error": str(exc),
+            },
         )
         raise
     finally:

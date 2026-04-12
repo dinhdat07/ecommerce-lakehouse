@@ -1,21 +1,22 @@
 # 3-Node Ubuntu Deployment Guide
 
-This guide describes a simple, production-minded shape for three Ubuntu servers while the repository remains on the local/filesystem backend.
+This guide describes the server-ready deployment path using the additive `infra/server/` assets. It keeps the repo architecture unchanged: Spark performs Bronze, Silver, and Gold transformations; Trino remains query-only; Iceberg tables stay physical; local/demo workflows remain separate under the root `infra/` stack.
 
 ## Target Topology
 
 - `node1`: control and services node
-  - Kafka broker/controller
-  - MinIO
+  - Kafka broker/controller 1
+  - MinIO gateway or external object-storage access
+  - Postgres for the Iceberg JDBC catalog
   - Trino coordinator
   - Superset
-  - shared storage export or shared mount management
+  - optional Spark master
 - `node2`: compute node
-  - Python runtime
-  - future Spark worker / batch execution
+  - Kafka broker/controller 2
+  - Spark worker / batch execution
 - `node3`: compute node
-  - Python runtime
-  - future Spark worker / streaming execution
+  - Kafka broker/controller 3
+  - Spark worker / streaming execution
 
 ## Step 1: Prepare All Three Servers
 
@@ -23,25 +24,23 @@ Run on `node1`, `node2`, and `node3`:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip openjdk-17-jre-headless git curl
+sudo apt install -y python3 python3-venv python3-pip openjdk-17-jre-headless git curl docker.io docker-compose-plugin
 ```
 
 Clone the repository to the same path on each node, for example `/opt/ecommerce-lakehouse`.
 
-## Step 2: Provide Shared Storage
+## Step 2: Prepare Shared Services
 
-For the current backend, all nodes must see the same output and manifest paths.
+Recommended shape:
 
-Recommended simple approach:
+1. Use external distributed MinIO or S3-compatible storage for Bronze, Silver, Gold, and the Iceberg warehouse.
+2. Run the Iceberg JDBC catalog database on `node1`.
+3. Use durable shared paths on each node for Spark temp data, streaming checkpoints, manifests, and benchmark outputs.
 
-1. Export an NFS share from `node1`, for example `/srv/lakehouse-shared`.
-2. Mount it on all three nodes at `/mnt/lakehouse-shared`.
-3. Use these paths in `.env` on every node:
+Example server paths:
 
 ```bash
-LOCAL_DATA_ROOT=/mnt/lakehouse-shared/lakehouse
-MANIFEST_ROOT=/mnt/lakehouse-shared/manifests
-CHECKPOINT_ROOT=/mnt/lakehouse-shared/checkpoints
+sudo mkdir -p /srv/ecommerce/{raw,sample,manifests,checkpoints,benchmarks,logs,runtime,spark-tmp}
 ```
 
 ## Step 3: Bootstrap Python on All Nodes
@@ -61,63 +60,97 @@ WITH_PLATFORM=1 bash scripts/bootstrap_local.sh
 
 ## Step 4: Configure Environment
 
-Copy `.env.example` to `.env` on all nodes and align the shared settings:
+Create the server env files on `node1`, then distribute matching copies to `node2` and `node3`:
 
 ```bash
-cp .env.example .env
+cp infra/server/env/server.env.example infra/server/env/server.env
+cp infra/server/env/kafka-cluster.env.example infra/server/env/kafka-cluster.env
+cp infra/server/env/storage-minio.env.example infra/server/env/storage-minio.env
+cp infra/server/env/benchmark.env.example infra/server/env/benchmark.env
 ```
 
 Set at minimum:
 
 ```bash
 ENV=cluster
-LOCAL_DATA_ROOT=/mnt/lakehouse-shared/lakehouse
-MANIFEST_ROOT=/mnt/lakehouse-shared/manifests
-CHECKPOINT_ROOT=/mnt/lakehouse-shared/checkpoints
-KAFKA_BOOTSTRAP_SERVERS=node1:9092
-S3_ENDPOINT=http://node1:9000
-TRINO_HOST=node1
-TRINO_PORT=8080
-SUPERSET_URL=http://node1:8088
+DEPLOYMENT_PROFILE=server
+KAFKA_BOOTSTRAP_SERVERS=node1:9092,node2:9092,node3:9092
+KAFKA_CONTROLLER_QUORUM_VOTERS=1@node1:9093,2@node2:9093,3@node3:9093
+S3_ENDPOINT=https://minio-cluster.example.com
+S3_PATH_STYLE_ACCESS=true
+ICEBERG_CATALOG_URI=jdbc:postgresql://node1:5432/iceberg
+ICEBERG_WAREHOUSE=s3://warehouse
+CHECKPOINT_ROOT=/srv/ecommerce/checkpoints
+MANIFEST_ROOT=/srv/ecommerce/manifests
+BENCHMARK_OUTPUT_ROOT=/srv/ecommerce/benchmarks
+SPARK_MASTER=spark://node1:7077
 ```
 
-## Step 5: Validate the Shared Local Backend
+If you use managed S3 instead of MinIO, start from `infra/server/env/storage-s3.env.example` instead.
 
-On `node2`, run a batch load:
+## Step 5: Bring Up Kafka on Node1
 
 ```bash
-bash scripts/clean_local_state.sh
-bash scripts/run_local_batch.sh
+bash infra/server/scripts/start-kafka-cluster.sh
+bash infra/server/scripts/create-kafka-topics.sh
+bash infra/server/scripts/validate-kafka.sh
 ```
 
-On `node3`, inspect the same shared outputs:
+This uses the 3-broker KRaft template in `infra/server/compose/docker-compose.kafka-cluster.yml`. For a non-Docker Kafka deployment, keep the same broker addresses and topic settings from the env files.
+
+## Step 6: Validate Object Storage and Trino Catalog Rendering
+
+On `node1`:
 
 ```bash
-find /mnt/lakehouse-shared/lakehouse -maxdepth 4 -type f | sort
-find /mnt/lakehouse-shared/manifests -maxdepth 3 -type f | sort
+bash infra/server/scripts/validate-storage.sh
+bash infra/server/scripts/render-trino-catalog.sh
 ```
 
-This confirms all nodes can read the same persisted pipeline state.
+Copy the rendered `infra/server/trino/catalog/iceberg.properties` into the Trino server catalog directory before starting Trino.
 
-## Step 6: Introduce Services on Node1
+## Step 7: Start Spark and Server Streaming
 
-When Docker Compose or container orchestration is available on `node1`:
+1. Start the Spark master on `node1`.
+2. Start Spark workers on `node2` and `node3`.
+3. Start the long-running streaming job from the node that owns the driver process:
 
-1. Start MinIO, Kafka, Trino, and Superset based on `infra/docker-compose.yml`.
-2. Create the Kafka topic using `scripts/create_kafka_topics.sh`.
-3. Point future batch and streaming runs at these service endpoints via `.env`.
+```bash
+bash infra/server/scripts/start-streaming.sh
+```
 
-## Step 7: Evolve to Real Multi-Node Execution
+Check progress and checkpoint state:
 
-Once Spark and shared object storage are ready:
+```bash
+bash infra/server/scripts/inspect-streaming-state.sh
+```
 
-1. Move `BRONZE_PATH`, `SILVER_PATH`, and `GOLD_PATH` to `s3a://...` locations in MinIO.
-2. Run Spark master/coordinator on `node1`.
-3. Run Spark workers on `node2` and `node3`.
-4. Keep the existing CLI boundaries and replace only the backend implementation.
+Stop or reset safely when needed:
 
-## Limitations of This 3-Node Guide
+```bash
+bash infra/server/scripts/stop-streaming.sh
+bash infra/server/scripts/reset-streaming-state.sh
+```
 
-- The current repository does not yet provision Spark, Kafka, Trino, or Superset automatically across the three nodes.
-- The filesystem backend is appropriate for shared validation and operator flow, not for full distributed scale.
-- A future production version should replace NFS-backed shared files with object storage plus Iceberg metadata and explicit service HA.
+## Step 8: Run Full Historical Benchmarks
+
+Point `BENCHMARK_INPUT_DIR` at the external raw-data location for `2019-10` through `2020-02`, then run:
+
+```bash
+bash infra/server/scripts/run-full-benchmark.sh
+bash infra/server/scripts/collect-benchmark-results.sh
+```
+
+Artifacts are written under `BENCHMARK_OUTPUT_ROOT/<run_label>/`.
+
+## Step 9: Query and BI Layer
+
+1. Start Trino on `node1` with the rendered Iceberg catalog.
+2. Start Superset on `node1`.
+3. Point both services at the same Trino coordinator and object store used by Spark.
+
+## Limitations and Pending Validation
+
+- Kafka cluster templates, streaming controls, storage validation, and benchmark wrappers are implemented, but full behavior still needs runtime validation on real servers.
+- The repo does not yet ship a full production orchestrator for Spark, Trino, Superset, and Postgres across all nodes.
+- External distributed MinIO or S3 credentials, TLS, firewall rules, and service hardening remain environment-specific operational work.

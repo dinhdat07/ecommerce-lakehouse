@@ -1,0 +1,17 @@
+[Unit]
+Description=Ecommerce Lakehouse Streaming Pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REPO_ROOT}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${REPO_ROOT}/infra/server/scripts/start-streaming.sh
+ExecStop=${REPO_ROOT}/infra/server/scripts/stop-streaming.sh
+Restart=always
+RestartSec=15
+User=${SERVICE_USER}
+
+[Install]
+WantedBy=multi-user.target

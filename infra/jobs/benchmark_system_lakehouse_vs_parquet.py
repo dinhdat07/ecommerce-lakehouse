@@ -24,6 +24,7 @@ if str(JOBS_DIR) not in sys.path:
     sys.path.insert(0, str(JOBS_DIR))
 
 import batch_backfill_to_iceberg as bb  # noqa: E402
+from common.constants import ICEBERG_WAREHOUSE  # noqa: E402
 from dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality  # noqa: E402
 
 
@@ -94,9 +95,10 @@ def _local_dir_size_bytes(path: Path) -> int:
     return sum(candidate.stat().st_size for candidate in path.rglob("*") if candidate.is_file())
 
 
-def _warehouse_table_path(table_name: str) -> str:
+def _warehouse_table_path(table_name: str, warehouse_uri: str) -> str:
     _, schema, short_name = table_name.split(".", 2)
-    return f"s3://warehouse/{schema}.db/{short_name}"
+    warehouse_root = warehouse_uri.rstrip("/")
+    return f"{warehouse_root}/{schema}.db/{short_name}"
 
 
 def _hadoop_path_size_bytes(spark, uri: str) -> int:
@@ -240,7 +242,7 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: Path) -> dict[str, Any
     }
 
 
-def _run_iceberg_lakehouse(spark, bronze_batch) -> dict[str, Any]:
+def _run_iceberg_lakehouse(spark, bronze_batch, *, warehouse_uri: str) -> dict[str, Any]:
     _drop_bench_tables(spark)
     bb.create_tables_if_needed(spark)
     result = bb.process_bronze_batch(
@@ -259,7 +261,10 @@ def _run_iceberg_lakehouse(spark, bronze_batch) -> dict[str, Any]:
             "funnel_totals": f"SELECT sum(views) AS views, sum(purchases) AS purchases FROM {bb.GOLD_CONVERSION_FUNNEL}",
         },
     )
-    storage_bytes = sum(_hadoop_path_size_bytes(spark, _warehouse_table_path(table_name)) for table_name in _bench_table_names())
+    storage_bytes = sum(
+        _hadoop_path_size_bytes(spark, _warehouse_table_path(table_name, warehouse_uri))
+        for table_name in _bench_table_names()
+    )
     return {
         "ingestion_seconds": result["bronze_metrics"]["duration_seconds"],
         "transformation_seconds": round(
@@ -298,6 +303,11 @@ def parse_args() -> argparse.Namespace:
         default="/tmp/benchmark_parquet_warehouse",
         help="Directory for Parquet baseline outputs.",
     )
+    parser.add_argument(
+        "--warehouse-uri",
+        default=ICEBERG_WAREHOUSE.replace("s3a://", "s3://"),
+        help="Warehouse URI used to estimate Iceberg storage size.",
+    )
     parser.add_argument("--output-json", help="Optional JSON output path.")
     parser.add_argument("--output-csv", help="Optional CSV output path.")
     return parser.parse_args()
@@ -322,7 +332,7 @@ def main() -> None:
         },
         "bronze_row_count": bronze_row_count,
         "parquet": _run_parquet_baseline(spark, bronze_batch, Path(args.parquet_warehouse)),
-        "iceberg": _run_iceberg_lakehouse(spark, bronze_batch),
+        "iceberg": _run_iceberg_lakehouse(spark, bronze_batch, warehouse_uri=args.warehouse_uri),
     }
     _write_results(results, output_json=args.output_json, output_csv=args.output_csv)
     print(json.dumps(results, indent=2))

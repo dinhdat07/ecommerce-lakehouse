@@ -1,26 +1,49 @@
 # Multi-Node Readiness
 
-## What Is Already Ready
+## Implemented Readiness
 
 - Storage, manifest, and checkpoint roots are externalized through environment variables.
 - Logical Bronze, Silver, and Gold URIs are separated from local filesystem materialization.
 - App entrypoints are thin wrappers around shared pipeline modules, which makes backend replacement straightforward.
 - Kafka, Spark, MinIO, Iceberg, Trino, and Superset settings already have explicit configuration placeholders.
+- `infra/server/` now provides server-oriented env templates, runbooks, clustered Kafka Compose, Spark submit wrappers, storage validation, Trino catalog rendering, and benchmark wrappers.
+- The streaming job supports dual mode:
+  - `demo`: bounded replay for laptop runs
+  - `server`: long-running execution with configurable checkpointing, progress logs, and restart controls
 
-## Required Deployment Assumptions
+## Shared-State Assumptions
 
-- All compute nodes must see the same persisted stage outputs.
-- For the current filesystem backend, that means mounting the same shared path on all nodes, for example `/mnt/lakehouse-shared`.
-- For the target platform backend, shared persistence should move to MinIO/S3 plus Iceberg metadata.
+- All Spark writers and query engines must see the same object store buckets and the same Iceberg catalog metadata.
+- Local/demo mode still maps logical URIs to local paths. Server mode is intended for external MinIO or S3 plus the shared JDBC Iceberg catalog.
+- Streaming checkpoints, progress logs, manifests, and benchmark outputs should live on shared or durable server paths.
 
-## Straightforward Scaling Path
+## Server-Ready Components
 
-1. Keep the current CLI and pipeline module interfaces unchanged.
-2. Replace the local JSONL/CSV writers in `common/storage.py` with a backend adapter for Spark/Iceberg.
-3. Point `BRONZE_PATH`, `SILVER_PATH`, and `GOLD_PATH` at shared object storage.
-4. Set `LOCAL_DATA_ROOT`, `MANIFEST_ROOT`, and `CHECKPOINT_ROOT` to mounted shared paths during the transition period.
-5. Move batch and streaming execution to Spark submit commands or a scheduler while preserving the same stage boundaries.
+1. Clustered Kafka template:
+   - `infra/server/compose/docker-compose.kafka-cluster.yml`
+   - topic bootstrap via `infra/server/scripts/create-kafka-topics.sh`
+2. Server streaming controls:
+   - `infra/server/scripts/start-streaming.sh`
+   - `infra/server/scripts/stop-streaming.sh`
+   - `infra/server/scripts/reset-streaming-state.sh`
+   - `infra/server/scripts/inspect-streaming-state.sh`
+3. External storage support:
+   - `infra/server/env/storage-minio.env.example`
+   - `infra/server/env/storage-s3.env.example`
+   - `infra/server/scripts/validate-storage.sh`
+   - `infra/server/scripts/render-trino-catalog.sh`
+4. Full benchmark wrappers:
+   - `infra/server/scripts/run-full-benchmark.sh`
+   - `infra/server/scripts/collect-benchmark-results.sh`
+5. Long-running service templates:
+   - `infra/server/systemd/*.template`
 
-## Practical Current Limitation
+## What Still Needs Real Server Validation
 
-The current implementation is multi-node compatible by configuration shape, but not yet multi-node distributed by execution engine. It is best viewed as a clean local reference implementation with a migration path, not as a finished cluster runtime.
+- Multi-broker Kafka quorum behavior and failover under real network conditions
+- Shared-object-storage concurrency with multiple Spark executors or nodes
+- Long-running checkpoint recovery after node or broker interruption
+- Full historical benchmark runtime on server hardware using external raw data
+- Trino connectivity against the rendered server catalog in the target environment
+
+These pieces are implemented in config, scripts, and runbooks, but remain pending actual server execution.

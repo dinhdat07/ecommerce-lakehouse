@@ -1,6 +1,6 @@
 # Infrastructure Notes
 
-This directory now contains a laptop-friendly Docker Compose stack for lightweight multi-node simulation.
+The root `infra/` directory remains the default laptop/demo profile. Server/full-scale assets now live separately under `infra/server/`, while `infra/local/` documents the current local profile and env template.
 
 ## Included Components
 
@@ -14,6 +14,14 @@ This directory now contains a laptop-friendly Docker Compose stack for lightweig
 - Superset for the demo dashboard
 
 The stack is intentionally minimal so it can run on a single laptop with constrained disk space and still be easy to tear down completely.
+
+## Profile Split
+
+- Root `infra/`: active local/demo stack and helper scripts
+- `infra/local/`: local profile notes and env example
+- `infra/server/`: clustered Kafka, long-running streaming, external object storage, and full benchmark assets for server deployment
+
+Use the root stack for bounded development. Use `infra/server/` when preparing a real multi-node environment.
 
 ## Main Files
 

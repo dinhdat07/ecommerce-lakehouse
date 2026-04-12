@@ -27,6 +27,7 @@ try:
 except ImportError:  # pragma: no cover - alternate import when running as a package
     from infra.jobs.dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality
 
+from common.constants import SPARK_APP_NAME_PREFIX, SPARK_SQL_SHUFFLE_PARTITIONS  # noqa: E402
 from common.observability import record_stage_event, stage_elapsed_seconds, stage_timer  # noqa: E402
 from common.runtime import utc_now_iso  # noqa: E402
 
@@ -78,9 +79,9 @@ def parse_args() -> argparse.Namespace:
 def build_spark_session() -> SparkSession:
     """Create the Spark session used for the batch backfill."""
 
-    spark = SparkSession.builder.appName("batch-backfill-to-iceberg").getOrCreate()
+    spark = SparkSession.builder.appName(f"{SPARK_APP_NAME_PREFIX}-batch-backfill").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
-    spark.conf.set("spark.sql.shuffle.partitions", "8")
+    spark.conf.set("spark.sql.shuffle.partitions", str(SPARK_SQL_SHUFFLE_PARTITIONS))
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
     return spark
 

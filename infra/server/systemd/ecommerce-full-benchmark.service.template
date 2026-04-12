@@ -1,0 +1,14 @@
+[Unit]
+Description=Ecommerce Lakehouse Full Benchmark
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=${REPO_ROOT}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${REPO_ROOT}/infra/server/scripts/run-full-benchmark.sh
+User=${SERVICE_USER}
+
+[Install]
+WantedBy=multi-user.target

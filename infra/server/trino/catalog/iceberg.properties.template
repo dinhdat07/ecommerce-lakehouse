@@ -1,0 +1,16 @@
+connector.name=iceberg
+iceberg.catalog.type=${ICEBERG_CATALOG_TYPE}
+iceberg.jdbc-catalog.schema-version=V0
+iceberg.jdbc-catalog.catalog-name=${ICEBERG_CATALOG}
+iceberg.jdbc-catalog.driver-class=${ICEBERG_CATALOG_DRIVER}
+iceberg.jdbc-catalog.connection-url=${ICEBERG_CATALOG_URI}
+iceberg.jdbc-catalog.connection-user=${ICEBERG_CATALOG_USER}
+iceberg.jdbc-catalog.connection-password=${ICEBERG_CATALOG_PASSWORD}
+iceberg.jdbc-catalog.default-warehouse-dir=${ICEBERG_WAREHOUSE}
+iceberg.file-format=PARQUET
+fs.native-s3.enabled=true
+s3.endpoint=${S3_ENDPOINT}
+s3.region=${S3_REGION}
+s3.aws-access-key=${S3_ACCESS_KEY}
+s3.aws-secret-key=${S3_SECRET_KEY}
+s3.path-style-access=${S3_PATH_STYLE_ACCESS}

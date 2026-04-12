@@ -55,6 +55,25 @@ Local-first e-commerce lakehouse for user behavior analytics with Bronze, Silver
    python3 -m pytest -q
    ```
 
+## Deployment Profiles
+
+- `infra/local/`: laptop and WSL demo profile. This keeps the current Docker Compose flow, bounded replay defaults, and small benchmark inputs.
+- `infra/server/`: server/full-scale profile. This adds clustered Kafka templates, long-running streaming scripts, external MinIO or S3 config, full benchmark wrappers, and runbooks.
+
+Use the matching env templates instead of mixing settings:
+
+```bash
+cp infra/local/env/local.env.example .env
+```
+
+For server work, keep the repo `.env` minimal and use:
+
+```bash
+cp infra/server/env/server.env.example infra/server/env/server.env
+cp infra/server/env/storage-minio.env.example infra/server/env/storage-minio.env
+cp infra/server/env/kafka-cluster.env.example infra/server/env/kafka-cluster.env
+```
+
 ## Docker Demo
 
 To run the laptop-friendly Phase 1 batch demo with Iceberg, Trino, and Superset:
@@ -146,8 +165,8 @@ BENCH_MODE=full BENCH_INPUT_DIR=/workspace/data/raw bash infra/scripts/run-phase
 - `docs/benchmarking.md`: Phase 3 benchmark modes, commands, and outputs
 - `docs/local_setup.md`: local setup, sample data, and test commands
 - `docs/docker_laptop_stack.md`: laptop-friendly Docker Compose multi-node simulation
-- `docs/multi_node_readiness.md`: scaling path and shared-storage assumptions
-- `docs/deployment_3node_ubuntu.md`: step-by-step 3-node Ubuntu deployment guide
+- `docs/multi_node_readiness.md`: implemented server-ready assets and pending server validation
+- `docs/deployment_3node_ubuntu.md`: step-by-step 3-node Ubuntu deployment guide using `infra/server/`
 - `docs/file_reference.md`: file roles and key classes/functions
 - `docs/system_map.md`: file responsibilities
 - `docs/improvements.md`: improvement and scaling recommendations
