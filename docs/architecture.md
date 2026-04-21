@@ -14,7 +14,7 @@
 - Batch-first historical backfill CLI for `2019-10` to `2020-02`.
 - Bounded streaming replay CLI for `2020-03` to `2020-04`.
 - Physical Bronze, Silver, and Gold Iceberg tables with stable table names.
-- Gold tables: `daily_revenue`, `top_products`, `conversion_funnel_daily`, `category_performance_daily`, `session_funnel`, and `user_conversion_path`.
+- Gold tables: `daily_revenue`, `top_products`, `conversion_funnel_daily`, `category_performance_daily`, `session_funnel`, `user_conversion_path`, `cohort_retention`, `repeat_purchase`, `product_affinity`, `time_to_conversion_distribution`, and `rfm_segmentation`.
 - Trino SQL access and a Superset sample dashboard backed by materialized Gold tables.
 
 ## Hidden Layer
@@ -24,7 +24,7 @@
 - Null normalization, type coercion, and event-type canonicalization before analytics.
 - Session resolution that uses `user_session` first and derives fallback sessions with a 30-minute inactivity rule only when needed.
 - Bounded streaming execution that deliberately stops after a configured timeout instead of running as an unbounded service in laptop mode.
-- Physical Gold refresh by affected `event_date` partitions inside Spark, with Trino remaining query-only.
+- Physical Gold refresh by affected `event_date` partitions inside Spark for date-scoped marts, with full-Silver refreshes for the history-dependent advanced marts and Trino remaining query-only.
 
 ## Data Flow
 

@@ -39,10 +39,20 @@ def _apply_bench_table_names(prefix: str) -> None:
     bb.GOLD_CATEGORY_PERFORMANCE = f"{prefix}category_performance_daily"
     bb.GOLD_SESSION_FUNNEL = f"{prefix}session_funnel"
     bb.GOLD_USER_CONVERSION_PATH = f"{prefix}user_conversion_path"
+    bb.GOLD_COHORT_RETENTION = f"{prefix}cohort_retention"
+    bb.GOLD_REPEAT_PURCHASE = f"{prefix}repeat_purchase"
+    bb.GOLD_PRODUCT_AFFINITY = f"{prefix}product_affinity"
+    bb.GOLD_TIME_TO_CONVERSION_DISTRIBUTION = f"{prefix}time_to_conversion_distribution"
+    bb.GOLD_RFM_SEGMENTATION = f"{prefix}rfm_segmentation"
 
 
 def _drop_current_bench_tables(spark) -> None:
     for table_name in [
+        bb.GOLD_RFM_SEGMENTATION,
+        bb.GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+        bb.GOLD_PRODUCT_AFFINITY,
+        bb.GOLD_REPEAT_PURCHASE,
+        bb.GOLD_COHORT_RETENTION,
         bb.GOLD_USER_CONVERSION_PATH,
         bb.GOLD_SESSION_FUNNEL,
         bb.GOLD_CATEGORY_PERFORMANCE,

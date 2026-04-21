@@ -32,10 +32,21 @@
   - `category_performance_daily`
   - `session_funnel`
   - `user_conversion_path`
+  - `cohort_retention`
+  - `repeat_purchase`
+  - `product_affinity`
+  - `time_to_conversion_distribution`
+  - `rfm_segmentation`
 
 ## Operational Layer
 
 - Gold refresh is incremental by `event_date`: only partitions touched by newly inserted Silver rows are recomputed.
+- Advanced Gold tables that depend on broader history or full-session context are refreshed from the full Silver state:
+  - `cohort_retention`
+  - `repeat_purchase`
+  - `product_affinity`
+  - `time_to_conversion_distribution`
+  - `rfm_segmentation`
 - Trino is query-only in Phase 1; transformation logic runs only in Spark.
 - Trino remains query-only in Phase 2; no Trino views or CTAS transformations are used.
 - Phase 2 replay is intentionally bounded by sample size, replay sleep interval, `maxOffsetsPerTrigger`, and streaming timeout.

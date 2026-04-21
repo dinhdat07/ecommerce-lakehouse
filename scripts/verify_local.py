@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.config import load_config
-from pipelines.bronze.backfill import run_bronze_backfill
-from pipelines.gold.aggregate import run_silver_to_gold
-from pipelines.silver.transform import run_bronze_to_silver
+from common.config import load_config  # noqa: E402
+from pipelines.bronze.backfill import run_bronze_backfill  # noqa: E402
+from pipelines.gold.aggregate import run_silver_to_gold  # noqa: E402
+from pipelines.silver.transform import run_bronze_to_silver  # noqa: E402
 
 
 def build_sample_csv(path: Path) -> None:
@@ -30,8 +30,11 @@ def build_sample_csv(path: Path) -> None:
             [
                 "event_time,event_type,product_id,category_id,category_code,brand,price,user_id,user_session",
                 "2020-04-01T10:00:00Z,view,101,200,electronics.audio,Acme,10.00,1,sess-1",
+                "2020-04-01T10:00:30Z,view,102,200,electronics.audio,Acme,12.00,1,sess-1",
                 "2020-04-01T10:01:00Z,cart,101,200,electronics.audio,Acme,10.00,1,sess-1",
+                "2020-04-01T10:01:30Z,cart,102,200,electronics.audio,Acme,12.00,1,sess-1",
                 "2020-04-01T10:02:00Z,purchase,101,200,electronics.audio,Acme,10.00,1,sess-1",
+                "2020-04-01T10:02:30Z,purchase,102,200,electronics.audio,Acme,12.00,1,sess-1",
             ]
         ),
         encoding="utf-8",
@@ -60,15 +63,20 @@ def main() -> None:
         silver = run_bronze_to_silver(config)
         gold = run_silver_to_gold(config)
 
-        assert bronze.rows_written == 3
-        assert silver.valid_rows == 3
-        assert gold.rows_read == 3
+        assert bronze.rows_written == 6
+        assert silver.valid_rows == 6
+        assert gold.rows_read == 6
 
         expected_tables = {
+            "cohort_retention",
             "conversion_funnel",
+            "product_affinity",
             "product_popularity",
+            "repeat_purchase",
             "revenue_by_category",
+            "rfm_segmentation",
             "session_summary",
+            "time_to_conversion_distribution",
             "user_activity_summary",
         }
         actual_tables = {path.parents[1].name for path in gold.output_paths}

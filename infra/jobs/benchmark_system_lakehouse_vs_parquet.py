@@ -37,6 +37,11 @@ def _apply_bench_table_names(prefix: str = "lakehouse.demo.bench_") -> None:
     bb.GOLD_CATEGORY_PERFORMANCE = f"{prefix}category_performance_daily"
     bb.GOLD_SESSION_FUNNEL = f"{prefix}session_funnel"
     bb.GOLD_USER_CONVERSION_PATH = f"{prefix}user_conversion_path"
+    bb.GOLD_COHORT_RETENTION = f"{prefix}cohort_retention"
+    bb.GOLD_REPEAT_PURCHASE = f"{prefix}repeat_purchase"
+    bb.GOLD_PRODUCT_AFFINITY = f"{prefix}product_affinity"
+    bb.GOLD_TIME_TO_CONVERSION_DISTRIBUTION = f"{prefix}time_to_conversion_distribution"
+    bb.GOLD_RFM_SEGMENTATION = f"{prefix}rfm_segmentation"
 
 
 def _bench_table_names() -> list[str]:
@@ -49,6 +54,11 @@ def _bench_table_names() -> list[str]:
         bb.GOLD_CATEGORY_PERFORMANCE,
         bb.GOLD_SESSION_FUNNEL,
         bb.GOLD_USER_CONVERSION_PATH,
+        bb.GOLD_COHORT_RETENTION,
+        bb.GOLD_REPEAT_PURCHASE,
+        bb.GOLD_PRODUCT_AFFINITY,
+        bb.GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+        bb.GOLD_RFM_SEGMENTATION,
     ]
 
 
@@ -181,33 +191,55 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: Path) -> dict[str, Any
         "category_performance_daily": bb.build_category_performance_daily(silver_slice),
         "session_funnel": bb.build_session_funnel(sessionized),
         "user_conversion_path": bb.build_user_conversion_path(sessionized),
+        "cohort_retention": bb.build_cohort_retention(silver_slice),
+        "repeat_purchase": bb.build_repeat_purchase(silver_slice),
+        "product_affinity": bb.build_product_affinity(sessionized),
+        "time_to_conversion_distribution": bb.build_time_to_conversion_distribution(sessionized),
+        "rfm_segmentation": bb.build_rfm_segmentation(silver_slice),
     }
     gold_specs = {
-        "daily_revenue": ("daily_revenue", ("purchase_count", "purchase_revenue", "unique_buyers")),
-        "top_products": ("top_products", ("views", "carts", "purchases", "purchase_revenue", "unique_users")),
-        "conversion_funnel_daily": ("conversion_funnel_daily", ("views", "carts", "purchases")),
+        "daily_revenue": ("daily_revenue", ("purchase_count", "purchase_revenue", "unique_buyers"), ("event_date",)),
+        "top_products": ("top_products", ("views", "carts", "purchases", "purchase_revenue", "unique_users"), ("event_date",)),
+        "conversion_funnel_daily": ("conversion_funnel_daily", ("views", "carts", "purchases"), ("event_date",)),
         "category_performance_daily": (
             "category_performance_daily",
             ("views", "carts", "purchases", "purchase_revenue", "unique_buyers"),
+            ("event_date",),
         ),
         "session_funnel": (
             "session_funnel",
             ("total_events", "distinct_products", "views", "carts", "purchases", "purchase_revenue"),
+            ("event_date",),
         ),
         "user_conversion_path": (
             "user_conversion_path",
             ("session_count", "views", "carts", "purchases", "purchase_revenue"),
+            ("event_date",),
+        ),
+        "cohort_retention": ("cohort_retention", ("cohort_users", "active_users"), ("cohort_month", "period_offset")),
+        "repeat_purchase": ("repeat_purchase", ("purchasers", "repeat_purchasers"), ("activity_month",)),
+        "product_affinity": ("product_affinity", ("co_purchase_sessions",), ("product_a", "product_b")),
+        "time_to_conversion_distribution": (
+            "time_to_conversion_distribution",
+            ("conversions",),
+            ("event_date", "time_bucket"),
+        ),
+        "rfm_segmentation": (
+            "rfm_segmentation",
+            ("recency_days", "frequency_90d", "monetary_90d", "r_score", "f_score", "m_score"),
+            ("as_of_date", "user_id"),
         ),
     }
     gold_dq: dict[str, dict[str, Any]] = {}
     gold_row_counts: dict[str, int] = {}
     for name, dataframe in gold_tables.items():
         row_count = dataframe.count()
-        short_name, cols = gold_specs[name]
+        short_name, cols, required_cols = gold_specs[name]
         gold_dq[short_name] = summarize_gold_dataframe_quality(
             dataframe,
             name=short_name,
             columns=cols,
+            required_columns=required_cols,
             stage="gold_parquet",
         )
         out = gold_root / name
@@ -219,12 +251,16 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: Path) -> dict[str, Any
     gold_tables["daily_revenue"].createOrReplaceTempView("bench_parquet_daily_revenue")
     gold_tables["top_products"].createOrReplaceTempView("bench_parquet_top_products")
     gold_tables["conversion_funnel_daily"].createOrReplaceTempView("bench_parquet_conversion_funnel_daily")
+    gold_tables["repeat_purchase"].createOrReplaceTempView("bench_parquet_repeat_purchase")
+    gold_tables["rfm_segmentation"].createOrReplaceTempView("bench_parquet_rfm_segmentation")
     query_latencies = _run_queries(
         spark,
         {
             "daily_revenue_sum": "SELECT round(sum(purchase_revenue), 2) AS revenue FROM bench_parquet_daily_revenue",
             "top_products_avg": "SELECT round(avg(purchase_revenue), 2) AS avg_revenue FROM bench_parquet_top_products",
             "funnel_totals": "SELECT sum(views) AS views, sum(purchases) AS purchases FROM bench_parquet_conversion_funnel_daily",
+            "repeat_purchase_avg": "SELECT round(avg(repeat_purchase_rate), 4) AS rate FROM bench_parquet_repeat_purchase",
+            "rfm_users": "SELECT count(*) AS users FROM bench_parquet_rfm_segmentation",
         },
     )
 
@@ -259,6 +295,8 @@ def _run_iceberg_lakehouse(spark, bronze_batch, *, warehouse_uri: str) -> dict[s
             "daily_revenue_sum": f"SELECT round(sum(purchase_revenue), 2) AS revenue FROM {bb.GOLD_DAILY_REVENUE}",
             "top_products_avg": f"SELECT round(avg(purchase_revenue), 2) AS avg_revenue FROM {bb.GOLD_TOP_PRODUCTS}",
             "funnel_totals": f"SELECT sum(views) AS views, sum(purchases) AS purchases FROM {bb.GOLD_CONVERSION_FUNNEL}",
+            "repeat_purchase_avg": f"SELECT round(avg(repeat_purchase_rate), 4) AS rate FROM {bb.GOLD_REPEAT_PURCHASE}",
+            "rfm_users": f"SELECT count(*) AS users FROM {bb.GOLD_RFM_SEGMENTATION}",
         },
     )
     storage_bytes = sum(

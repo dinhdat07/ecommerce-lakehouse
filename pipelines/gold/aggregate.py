@@ -18,6 +18,11 @@ from common.manifests import RunManifest, write_manifest
 from common.pipeline_metrics import emit_pipeline_metrics
 from common.runtime import build_run_id
 from common.storage import iter_jsonl_files, read_jsonl, write_csv
+from pipelines.gold.cohort_retention import build_cohort_retention_table
+from pipelines.gold.product_affinity import build_product_affinity_table
+from pipelines.gold.repeat_purchase import build_repeat_purchase_table
+from pipelines.gold.rfm_segmentation import build_rfm_segmentation_table
+from pipelines.gold.time_to_conversion_distribution import build_time_to_conversion_distribution_table
 
 
 @dataclass(frozen=True)
@@ -198,7 +203,7 @@ def build_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
         row["purchase_revenue"] = round(row["purchase_revenue"], 2)
         session_rows.append(row)
 
-    return {
+    tables = {
         "user_activity_summary": sorted(user_rows, key=lambda item: (item["event_date"], item["user_id"])),
         "product_popularity": sorted(product_rows, key=lambda item: (item["event_date"], item["product_id"])),
         "conversion_funnel": sorted(funnel_rows, key=lambda item: item["event_date"]),
@@ -210,6 +215,20 @@ def build_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
             session_rows,
             key=lambda item: (item["event_date"], item["user_id"] or -1, item["user_session"] or ""),
         ),
+    }
+    tables.update(build_phase4_gold_tables(silver_rows))
+    return tables
+
+
+def build_phase4_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
+    """Build advanced Phase 4 Gold analytics with the canonical table schemas."""
+
+    return {
+        "cohort_retention": build_cohort_retention_table(silver_rows),
+        "repeat_purchase": build_repeat_purchase_table(silver_rows),
+        "product_affinity": build_product_affinity_table(silver_rows),
+        "time_to_conversion_distribution": build_time_to_conversion_distribution_table(silver_rows),
+        "rfm_segmentation": build_rfm_segmentation_table(silver_rows),
     }
 
 

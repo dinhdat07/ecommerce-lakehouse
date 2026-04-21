@@ -41,6 +41,11 @@ GOLD_CONVERSION_FUNNEL = f"{CATALOG}.{SCHEMA}.conversion_funnel_daily"
 GOLD_CATEGORY_PERFORMANCE = f"{CATALOG}.{SCHEMA}.category_performance_daily"
 GOLD_SESSION_FUNNEL = f"{CATALOG}.{SCHEMA}.session_funnel"
 GOLD_USER_CONVERSION_PATH = f"{CATALOG}.{SCHEMA}.user_conversion_path"
+GOLD_COHORT_RETENTION = f"{CATALOG}.{SCHEMA}.cohort_retention"
+GOLD_REPEAT_PURCHASE = f"{CATALOG}.{SCHEMA}.repeat_purchase"
+GOLD_PRODUCT_AFFINITY = f"{CATALOG}.{SCHEMA}.product_affinity"
+GOLD_TIME_TO_CONVERSION_DISTRIBUTION = f"{CATALOG}.{SCHEMA}.time_to_conversion_distribution"
+GOLD_RFM_SEGMENTATION = f"{CATALOG}.{SCHEMA}.rfm_segmentation"
 HISTORICAL_FILE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>[A-Za-z]{3})\.csv(?:\.gz)?$")
 MONTH_NAME_TO_NUMBER = {month[:3]: f"{index:02d}" for index, month in enumerate(calendar.month_name) if month}
 TABLE_PROPERTIES = {
@@ -179,6 +184,11 @@ def drop_tables_if_requested(spark: SparkSession, enabled: bool) -> None:
         return
 
     for table_name in [
+        GOLD_RFM_SEGMENTATION,
+        GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+        GOLD_PRODUCT_AFFINITY,
+        GOLD_REPEAT_PURCHASE,
+        GOLD_COHORT_RETENTION,
         GOLD_USER_CONVERSION_PATH,
         GOLD_SESSION_FUNNEL,
         GOLD_CATEGORY_PERFORMANCE,
@@ -363,6 +373,77 @@ def create_tables_if_needed(spark: SparkSession) -> None:
         )
         USING iceberg
         PARTITIONED BY (event_date)
+        TBLPROPERTIES ({table_properties})
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_COHORT_RETENTION} (
+            cohort_month STRING,
+            period_offset INT,
+            cohort_users BIGINT,
+            active_users BIGINT,
+            retention_rate DOUBLE
+        )
+        USING iceberg
+        TBLPROPERTIES ({table_properties})
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_REPEAT_PURCHASE} (
+            activity_month STRING,
+            purchasers BIGINT,
+            repeat_purchasers BIGINT,
+            repeat_purchase_rate DOUBLE
+        )
+        USING iceberg
+        TBLPROPERTIES ({table_properties})
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_PRODUCT_AFFINITY} (
+            product_a BIGINT,
+            product_b BIGINT,
+            co_purchase_sessions BIGINT,
+            affinity_lift DOUBLE
+        )
+        USING iceberg
+        TBLPROPERTIES ({table_properties})
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_TIME_TO_CONVERSION_DISTRIBUTION} (
+            event_date DATE,
+            time_bucket STRING,
+            conversions BIGINT
+        )
+        USING iceberg
+        PARTITIONED BY (event_date)
+        TBLPROPERTIES ({table_properties})
+        """
+    )
+
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {GOLD_RFM_SEGMENTATION} (
+            as_of_date DATE,
+            user_id BIGINT,
+            recency_days INT,
+            frequency_90d BIGINT,
+            monetary_90d DOUBLE,
+            r_score INT,
+            f_score INT,
+            m_score INT,
+            rfm_segment STRING
+        )
+        USING iceberg
         TBLPROPERTIES ({table_properties})
         """
     )
@@ -805,6 +886,241 @@ def build_user_conversion_path(sessionized: DataFrame) -> DataFrame:
     )
 
 
+def delete_all_rows(spark: SparkSession, table_name: str) -> None:
+    """Delete all rows from a table before a full-table refresh."""
+
+    spark.sql(f"DELETE FROM {table_name} WHERE true")
+
+
+def build_cohort_retention(full_silver: DataFrame) -> DataFrame:
+    """Build first-purchase monthly cohorts with monthly purchase retention."""
+
+    spark = full_silver.sparkSession
+    empty = spark.createDataFrame(
+        [],
+        "cohort_month STRING, period_offset INT, cohort_users BIGINT, active_users BIGINT, retention_rate DOUBLE",
+    )
+    purchases = full_silver.where(
+        (F.col("event_type") == F.lit("purchase")) & F.col("user_id").isNotNull()
+    ).select("user_id", "event_date")
+    if purchases.limit(1).count() == 0:
+        return empty
+
+    first_purchase = purchases.groupBy("user_id").agg(F.min("event_date").alias("first_purchase_date"))
+    cohorts = first_purchase.withColumn("cohort_month", F.date_format("first_purchase_date", "yyyy-MM"))
+    active = (
+        purchases.join(cohorts.select("user_id", "cohort_month", "first_purchase_date"), "user_id", "inner")
+        .withColumn(
+            "period_offset",
+            F.months_between(F.trunc(F.col("event_date"), "month"), F.trunc(F.col("first_purchase_date"), "month")).cast(
+                "int"
+            ),
+        )
+        .where(F.col("period_offset") >= 0)
+        .groupBy("cohort_month", "period_offset")
+        .agg(F.countDistinct("user_id").alias("active_users"))
+    )
+    cohort_sizes = cohorts.groupBy("cohort_month").agg(F.countDistinct("user_id").alias("cohort_users"))
+    return (
+        active.join(cohort_sizes, "cohort_month", "inner")
+        .withColumn("retention_rate", safe_ratio(F.col("active_users"), F.col("cohort_users")))
+        .select("cohort_month", "period_offset", "cohort_users", "active_users", "retention_rate")
+        .orderBy("cohort_month", "period_offset")
+    )
+
+
+def build_repeat_purchase(full_silver: DataFrame) -> DataFrame:
+    """Build monthly repeat-purchase rates based on each user's first purchase month."""
+
+    spark = full_silver.sparkSession
+    empty = spark.createDataFrame(
+        [],
+        "activity_month STRING, purchasers BIGINT, repeat_purchasers BIGINT, repeat_purchase_rate DOUBLE",
+    )
+    purchases = full_silver.where((F.col("event_type") == F.lit("purchase")) & F.col("user_id").isNotNull())
+    if purchases.limit(1).count() == 0:
+        return empty
+
+    first_purchase = purchases.groupBy("user_id").agg(F.min("event_date").alias("first_purchase_date"))
+    purchase_months = purchases.select(
+        "user_id",
+        F.date_format(F.date_trunc("month", F.col("event_date")), "yyyy-MM").alias("activity_month"),
+    ).distinct()
+    month_start = F.to_date(F.concat_ws("-", F.col("activity_month"), F.lit("01")))
+    repeat_users = (
+        purchase_months.join(first_purchase, "user_id", "inner")
+        .where(F.col("first_purchase_date") < month_start)
+        .select("activity_month", "user_id")
+        .distinct()
+    )
+    purchasers = purchase_months.groupBy("activity_month").agg(F.countDistinct("user_id").alias("purchasers"))
+    repeats = repeat_users.groupBy("activity_month").agg(F.countDistinct("user_id").alias("repeat_purchasers"))
+    return (
+        purchasers.join(repeats, "activity_month", "left")
+        .fillna(0, subset=["repeat_purchasers"])
+        .withColumn("repeat_purchase_rate", safe_ratio(F.col("repeat_purchasers"), F.col("purchasers")))
+        .select("activity_month", "purchasers", "repeat_purchasers", "repeat_purchase_rate")
+        .orderBy("activity_month")
+    )
+
+
+def build_product_affinity(sessionized: DataFrame, *, top_pairs: int = 200) -> DataFrame:
+    """Build product-pair affinity based on products purchased within the same resolved session."""
+
+    spark = sessionized.sparkSession
+    empty = spark.createDataFrame([], "product_a BIGINT, product_b BIGINT, co_purchase_sessions BIGINT, affinity_lift DOUBLE")
+    purchases = sessionized.where(
+        (F.col("event_type") == F.lit("purchase")) & F.col("product_id").isNotNull() & F.col("session_id").isNotNull()
+    ).select("session_id", "product_id")
+    if purchases.limit(1).count() == 0:
+        return empty
+
+    products_by_session = purchases.groupBy("session_id").agg(F.collect_set("product_id").alias("products")).where(
+        F.size(F.col("products")) >= 2
+    )
+    if products_by_session.limit(1).count() == 0:
+        return empty
+
+    exploded_a = products_by_session.select("session_id", F.explode(F.col("products")).alias("product_a"))
+    exploded_b = products_by_session.select(F.col("session_id").alias("session_id_b"), F.explode(F.col("products")).alias("product_b"))
+    pairs = (
+        exploded_a.join(exploded_b, exploded_a.session_id == exploded_b.session_id_b, "inner")
+        .where(F.col("product_a") < F.col("product_b"))
+        .groupBy("product_a", "product_b")
+        .agg(F.count(F.lit(1)).alias("co_purchase_sessions"))
+    )
+    product_sessions = purchases.groupBy("product_id").agg(F.countDistinct("session_id").alias("session_count"))
+    total_sessions = int(purchases.agg(F.countDistinct("session_id").alias("session_count")).collect()[0]["session_count"])
+    if total_sessions <= 0:
+        return empty
+
+    return (
+        pairs.join(product_sessions.alias("left_counts"), F.col("product_a") == F.col("left_counts.product_id"), "inner")
+        .join(product_sessions.alias("right_counts"), F.col("product_b") == F.col("right_counts.product_id"), "inner")
+        .select(
+            F.col("product_a"),
+            F.col("product_b"),
+            F.col("co_purchase_sessions"),
+            F.col("left_counts.session_count").alias("session_count_a"),
+            F.col("right_counts.session_count").alias("session_count_b"),
+        )
+        .withColumn(
+            "affinity_lift",
+            safe_ratio(
+                F.col("co_purchase_sessions") * F.lit(float(total_sessions)),
+                F.col("session_count_a") * F.col("session_count_b"),
+            ),
+        )
+        .select("product_a", "product_b", "co_purchase_sessions", "affinity_lift")
+        .orderBy(F.col("co_purchase_sessions").desc(), F.col("product_a").asc(), F.col("product_b").asc())
+        .limit(top_pairs)
+    )
+
+
+def build_time_to_conversion_distribution(sessionized: DataFrame) -> DataFrame:
+    """Build a histogram of seconds from first view to first purchase within each session."""
+
+    spark = sessionized.sparkSession
+    empty = spark.createDataFrame([], "event_date DATE, time_bucket STRING, conversions BIGINT")
+    session_times = sessionized.groupBy("event_date", "session_id").agg(
+        F.min(F.when(F.col("event_type") == F.lit("view"), F.col("event_time"))).alias("first_view_at"),
+        F.min(F.when(F.col("event_type") == F.lit("purchase"), F.col("event_time"))).alias("first_purchase_at"),
+    )
+    session_times = session_times.where(
+        F.col("first_view_at").isNotNull()
+        & F.col("first_purchase_at").isNotNull()
+        & (F.col("first_purchase_at") >= F.col("first_view_at"))
+    )
+    if session_times.limit(1).count() == 0:
+        return empty
+
+    bucket = (
+        F.when(F.col("seconds_to_conversion") <= 60, F.lit("0-60s"))
+        .when(F.col("seconds_to_conversion") <= 300, F.lit("61-300s"))
+        .when(F.col("seconds_to_conversion") <= 1800, F.lit("301-1800s"))
+        .when(F.col("seconds_to_conversion") <= 86400, F.lit("1801-86400s"))
+        .otherwise(F.lit(">86400s"))
+    )
+    return (
+        session_times.withColumn(
+            "seconds_to_conversion",
+            F.unix_timestamp("first_purchase_at") - F.unix_timestamp("first_view_at"),
+        )
+        .withColumn("time_bucket", bucket)
+        .groupBy("event_date", "time_bucket")
+        .agg(F.count(F.lit(1)).alias("conversions"))
+        .orderBy("event_date", "time_bucket")
+    )
+
+
+def build_rfm_segmentation(full_silver: DataFrame, *, lookback_days: int = 90) -> DataFrame:
+    """Build trailing-window RFM scores and coarse user segments from purchase activity."""
+
+    spark = full_silver.sparkSession
+    empty = spark.createDataFrame(
+        [],
+        (
+            "as_of_date DATE, user_id BIGINT, recency_days INT, frequency_90d BIGINT, monetary_90d DOUBLE, "
+            "r_score INT, f_score INT, m_score INT, rfm_segment STRING"
+        ),
+    )
+    purchases_all = full_silver.where((F.col("event_type") == F.lit("purchase")) & F.col("user_id").isNotNull())
+    if purchases_all.limit(1).count() == 0:
+        return empty
+
+    as_of_date = purchases_all.agg(F.max("event_date").alias("as_of_date")).collect()[0]["as_of_date"]
+    if as_of_date is None:
+        return empty
+
+    window_start = F.date_sub(F.lit(as_of_date), lookback_days - 1)
+    purchases = purchases_all.where((F.col("event_date") >= window_start) & (F.col("event_date") <= F.lit(as_of_date)))
+    if purchases.limit(1).count() == 0:
+        return empty
+
+    rfm = (
+        purchases.groupBy("user_id")
+        .agg(
+            F.max("event_date").alias("last_purchase_date"),
+            F.count(F.lit(1)).alias("frequency_90d"),
+            F.round(F.sum(F.coalesce(F.col("price"), F.lit(0.0))), 2).alias("monetary_90d"),
+        )
+        .withColumn("as_of_date", F.lit(as_of_date))
+        .withColumn("recency_days", F.datediff(F.col("as_of_date"), F.col("last_purchase_date")))
+    )
+    recency_window = Window.orderBy(F.col("recency_days").asc_nulls_last(), F.col("user_id").asc())
+    frequency_window = Window.orderBy(F.col("frequency_90d").desc_nulls_last(), F.col("user_id").asc())
+    monetary_window = Window.orderBy(F.col("monetary_90d").desc_nulls_last(), F.col("user_id").asc())
+    return (
+        rfm.withColumn("r_tile", F.ntile(5).over(recency_window))
+        .withColumn("f_tile", F.ntile(5).over(frequency_window))
+        .withColumn("m_tile", F.ntile(5).over(monetary_window))
+        .withColumn("r_score", (F.lit(6) - F.col("r_tile")).cast("int"))
+        .withColumn("f_score", (F.lit(6) - F.col("f_tile")).cast("int"))
+        .withColumn("m_score", (F.lit(6) - F.col("m_tile")).cast("int"))
+        .withColumn(
+            "rfm_segment",
+            F.when((F.col("r_score") >= 4) & (F.col("f_score") >= 4) & (F.col("m_score") >= 4), F.lit("champions"))
+            .when((F.col("r_score") >= 4) & (F.col("f_score") <= 2), F.lit("new_customers"))
+            .when((F.col("r_score") <= 2) & (F.col("f_score") >= 3), F.lit("at_risk"))
+            .when((F.col("r_score") <= 2) & (F.col("f_score") <= 2), F.lit("hibernating"))
+            .when(F.col("f_score") >= 4, F.lit("loyal_customers"))
+            .otherwise(F.lit("potential"))
+        )
+        .select(
+            "as_of_date",
+            "user_id",
+            "recency_days",
+            "frequency_90d",
+            "monetary_90d",
+            "r_score",
+            "f_score",
+            "m_score",
+            "rfm_segment",
+        )
+        .orderBy("user_id")
+    )
+
+
 def delete_affected_partitions(spark: SparkSession, table_name: str, affected_dates: list[str]) -> None:
     """Delete Gold partitions for the affected dates before appending recomputed rows."""
 
@@ -822,8 +1138,10 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
 
     silver_slice = spark.table(SILVER_TABLE).where(F.col("event_date").cast("string").isin(affected_dates))
     sessionized = build_sessionized_events(silver_slice)
+    full_silver = spark.table(SILVER_TABLE)
+    sessionized_full = build_sessionized_events(full_silver)
 
-    gold_tables = {
+    incremental_gold_tables = {
         GOLD_DAILY_REVENUE: build_daily_revenue(silver_slice),
         GOLD_TOP_PRODUCTS: build_top_products(silver_slice),
         GOLD_CONVERSION_FUNNEL: build_conversion_funnel_daily(silver_slice),
@@ -831,10 +1149,17 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
         GOLD_SESSION_FUNNEL: build_session_funnel(sessionized),
         GOLD_USER_CONVERSION_PATH: build_user_conversion_path(sessionized),
     }
+    advanced_gold_tables = {
+        GOLD_COHORT_RETENTION: build_cohort_retention(full_silver),
+        GOLD_REPEAT_PURCHASE: build_repeat_purchase(full_silver),
+        GOLD_PRODUCT_AFFINITY: build_product_affinity(sessionized_full),
+        GOLD_TIME_TO_CONVERSION_DISTRIBUTION: build_time_to_conversion_distribution(sessionized_full),
+        GOLD_RFM_SEGMENTATION: build_rfm_segmentation(full_silver),
+    }
 
     row_counts: dict[str, int] = {}
     dq_summaries: dict[str, dict[str, object]] = {}
-    gold_dq_specs: dict[str, tuple[str, tuple[str, ...]]] = {
+    incremental_gold_dq_specs: dict[str, tuple[str, tuple[str, ...]]] = {
         GOLD_DAILY_REVENUE: ("daily_revenue", ("purchase_count", "purchase_revenue", "unique_buyers")),
         GOLD_TOP_PRODUCTS: ("top_products", ("views", "carts", "purchases", "purchase_revenue", "unique_users")),
         GOLD_CONVERSION_FUNNEL: ("conversion_funnel", ("views", "carts", "purchases")),
@@ -851,11 +1176,34 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
             ("session_count", "views", "carts", "purchases", "purchase_revenue"),
         ),
     }
-    for table_name, dataframe in gold_tables.items():
+    advanced_gold_dq_specs: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+        GOLD_COHORT_RETENTION: ("cohort_retention", ("cohort_users", "active_users"), ("cohort_month", "period_offset")),
+        GOLD_REPEAT_PURCHASE: (
+            "repeat_purchase",
+            ("purchasers", "repeat_purchasers"),
+            ("activity_month",),
+        ),
+        GOLD_PRODUCT_AFFINITY: (
+            "product_affinity",
+            ("co_purchase_sessions",),
+            ("product_a", "product_b"),
+        ),
+        GOLD_TIME_TO_CONVERSION_DISTRIBUTION: (
+            "time_to_conversion_distribution",
+            ("conversions",),
+            ("event_date", "time_bucket"),
+        ),
+        GOLD_RFM_SEGMENTATION: (
+            "rfm_segmentation",
+            ("recency_days", "frequency_90d", "monetary_90d", "r_score", "f_score", "m_score"),
+            ("as_of_date", "user_id"),
+        ),
+    }
+    for table_name, dataframe in incremental_gold_tables.items():
         row_count = dataframe.count()
-        spec = gold_dq_specs.get(table_name)
+        spec = incremental_gold_dq_specs.get(table_name)
         if spec:
-            short_name, cols = spec
+            short_name, cols = spec[0], spec[1]
             dq_summaries[short_name] = summarize_gold_dataframe_quality(
                 dataframe,
                 name=short_name,
@@ -865,6 +1213,28 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
         if row_count > 0:
             append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
         row_counts[table_name] = row_count
+
+    # These tables depend on global purchase/session history, so refresh them from the full Silver state.
+    for table_name, dataframe in advanced_gold_tables.items():
+        row_count = dataframe.count()
+        spec = advanced_gold_dq_specs.get(table_name)
+        if spec:
+            short_name, cols, required_cols = spec
+            dq_summaries[short_name] = summarize_gold_dataframe_quality(
+                dataframe,
+                name=short_name,
+                columns=cols,
+                required_columns=required_cols,
+            )
+        delete_all_rows(spark, table_name)
+        if row_count > 0:
+            if table_name == GOLD_TIME_TO_CONVERSION_DISTRIBUTION:
+                partition_count = max(dataframe.select("event_date").distinct().count(), 1)
+                append_to_iceberg(table_name, dataframe, partitions=partition_count)
+            else:
+                append_to_iceberg(table_name, dataframe, partitions=8)
+        row_counts[table_name] = row_count
+
     return {
         "row_counts": row_counts,
         "dq_summaries": dq_summaries,
@@ -1038,6 +1408,11 @@ def process_bronze_batch(
                     GOLD_CATEGORY_PERFORMANCE,
                     GOLD_SESSION_FUNNEL,
                     GOLD_USER_CONVERSION_PATH,
+                    GOLD_COHORT_RETENTION,
+                    GOLD_REPEAT_PURCHASE,
+                    GOLD_PRODUCT_AFFINITY,
+                    GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+                    GOLD_RFM_SEGMENTATION,
                 ],
                 started_at=gold_started_at,
             )
@@ -1120,6 +1495,11 @@ def main() -> None:
                 GOLD_CATEGORY_PERFORMANCE,
                 GOLD_SESSION_FUNNEL,
                 GOLD_USER_CONVERSION_PATH,
+                GOLD_COHORT_RETENTION,
+                GOLD_REPEAT_PURCHASE,
+                GOLD_PRODUCT_AFFINITY,
+                GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+                GOLD_RFM_SEGMENTATION,
             ],
             started_at=overall_started_at,
         )

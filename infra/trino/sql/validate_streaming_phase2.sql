@@ -36,7 +36,12 @@ SELECT
     (SELECT count(*) FROM iceberg.demo.conversion_funnel_daily WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS conversion_funnel_rows,
     (SELECT count(*) FROM iceberg.demo.category_performance_daily WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS category_performance_rows,
     (SELECT count(*) FROM iceberg.demo.session_funnel WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS session_funnel_rows,
-    (SELECT count(*) FROM iceberg.demo.user_conversion_path WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS user_conversion_path_rows;
+    (SELECT count(*) FROM iceberg.demo.user_conversion_path WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS user_conversion_path_rows,
+    (SELECT count(*) FROM iceberg.demo.time_to_conversion_distribution WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30') AS time_to_conversion_distribution_rows,
+    (SELECT count(*) FROM iceberg.demo.cohort_retention) AS cohort_retention_rows,
+    (SELECT count(*) FROM iceberg.demo.repeat_purchase) AS repeat_purchase_rows,
+    (SELECT count(*) FROM iceberg.demo.product_affinity) AS product_affinity_rows,
+    (SELECT count(*) FROM iceberg.demo.rfm_segmentation) AS rfm_segmentation_rows;
 
 -- Gold revenue must reconcile with Silver purchases
 SELECT
@@ -83,3 +88,28 @@ FROM iceberg.demo.user_conversion_path
 WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30'
 GROUP BY 1, 2
 ORDER BY 1, 3 DESC;
+
+-- Advanced Gold table sanity in the streaming window
+SELECT
+    event_date,
+    sum(conversions) AS conversions
+FROM iceberg.demo.time_to_conversion_distribution
+WHERE event_date BETWEEN DATE '2020-03-01' AND DATE '2020-04-30'
+GROUP BY 1
+ORDER BY 1;
+
+SELECT
+    count_if(period_offset < 0) AS negative_period_offsets
+FROM iceberg.demo.cohort_retention;
+
+SELECT
+    count_if(repeat_purchasers > purchasers) AS repeat_gt_purchasers
+FROM iceberg.demo.repeat_purchase;
+
+SELECT
+    count_if(product_a >= product_b) AS unordered_pairs
+FROM iceberg.demo.product_affinity;
+
+SELECT
+    count_if(r_score NOT BETWEEN 1 AND 5 OR f_score NOT BETWEEN 1 AND 5 OR m_score NOT BETWEEN 1 AND 5) AS invalid_rfm_scores
+FROM iceberg.demo.rfm_segmentation;

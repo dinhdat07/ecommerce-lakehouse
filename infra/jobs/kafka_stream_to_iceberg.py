@@ -190,6 +190,11 @@ def _batch_outputs() -> list[str]:
         "lakehouse.demo.category_performance_daily",
         "lakehouse.demo.session_funnel",
         "lakehouse.demo.user_conversion_path",
+        "lakehouse.demo.cohort_retention",
+        "lakehouse.demo.repeat_purchase",
+        "lakehouse.demo.product_affinity",
+        "lakehouse.demo.time_to_conversion_distribution",
+        "lakehouse.demo.rfm_segmentation",
     ]
 
 

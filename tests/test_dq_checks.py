@@ -97,6 +97,31 @@ def test_validate_gold_passes_non_negative_metrics():
         ],
         "product_popularity": [{"event_date": "2020-04-01", "views": 1, "carts": 0, "purchases": 0}],
         "session_summary": [{"event_date": "2020-04-01", "total_events": 1, "views": 1, "carts": 0, "purchases": 0}],
+        "cohort_retention": [
+            {"cohort_month": "2020-04", "period_offset": 0, "cohort_users": 1, "active_users": 1, "retention_rate": 1.0}
+        ],
+        "repeat_purchase": [
+            {"activity_month": "2020-04", "purchasers": 1, "repeat_purchasers": 0, "repeat_purchase_rate": 0.0}
+        ],
+        "product_affinity": [
+            {"product_a": 1, "product_b": 2, "co_purchase_sessions": 1, "affinity_lift": 1.0}
+        ],
+        "time_to_conversion_distribution": [
+            {"event_date": "2020-04-01", "time_bucket": "0-60s", "conversions": 1}
+        ],
+        "rfm_segmentation": [
+            {
+                "as_of_date": "2020-04-01",
+                "user_id": 10,
+                "recency_days": 0,
+                "frequency_90d": 1,
+                "monetary_90d": 10.0,
+                "r_score": 5,
+                "f_score": 5,
+                "m_score": 5,
+                "rfm_segment": "champions",
+            }
+        ],
     }
     report = validate_gold_tables_for_publication(tables)
     assert report.passed
@@ -109,6 +134,21 @@ def test_validate_gold_fails_missing_event_date():
         "user_activity_summary": [],
         "product_popularity": [],
         "session_summary": [],
+        "time_to_conversion_distribution": [],
     }
     report = validate_gold_tables_for_publication(tables)
     assert not report.passed
+
+
+def test_validate_gold_fails_missing_phase4_required_columns():
+    tables = {
+        "conversion_funnel": [],
+        "revenue_by_category": [],
+        "user_activity_summary": [],
+        "product_popularity": [],
+        "session_summary": [],
+        "cohort_retention": [{"cohort_month": "2020-04", "active_users": 1}],
+    }
+    report = validate_gold_tables_for_publication(tables)
+    assert not report.passed
+    assert any(rule.name == "cohort_retention_required_columns_present" and not rule.passed for rule in report.rules)

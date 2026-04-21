@@ -26,6 +26,21 @@ GOLD_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "product_popularity": ("event_date", "views", "carts", "purchases"),
     "session_summary": ("event_date", "total_events", "views", "carts", "purchases"),
     "revenue_by_category": ("event_date", "purchase_count", "purchase_revenue", "unique_buyers"),
+    "cohort_retention": ("cohort_month", "period_offset", "cohort_users", "active_users", "retention_rate"),
+    "repeat_purchase": ("activity_month", "purchasers", "repeat_purchasers", "repeat_purchase_rate"),
+    "product_affinity": ("product_a", "product_b", "co_purchase_sessions", "affinity_lift"),
+    "time_to_conversion_distribution": ("event_date", "time_bucket", "conversions"),
+    "rfm_segmentation": (
+        "as_of_date",
+        "user_id",
+        "recency_days",
+        "frequency_90d",
+        "monetary_90d",
+        "r_score",
+        "f_score",
+        "m_score",
+        "rfm_segment",
+    ),
 }
 DQ_SEVERITY_CRITICAL = "critical"
 DQ_SEVERITY_WARNING = "warning"
@@ -234,13 +249,14 @@ def validate_gold_tables_for_publication(tables: dict[str, list[dict]]) -> DQRep
                 f"rows_with_missing_columns={missing_columns} in {table_name}",
             )
         )
-        report.rules.append(
-            DQRuleResult(
-                f"{table_name}_event_date_not_null",
-                null_event_date == 0,
-                f"rows_with_null_event_date={null_event_date} in {table_name}",
+        if "event_date" in required:
+            report.rules.append(
+                DQRuleResult(
+                    f"{table_name}_event_date_not_null",
+                    null_event_date == 0,
+                    f"rows_with_null_event_date={null_event_date} in {table_name}",
+                )
             )
-        )
 
     funnel = tables.get("conversion_funnel") or []
     check_schema("conversion_funnel", funnel)
@@ -272,6 +288,30 @@ def validate_gold_tables_for_publication(tables: dict[str, list[dict]]) -> DQRep
         "revenue_by_category",
         revenue_cat,
         ("purchase_count", "purchase_revenue", "unique_buyers"),
+    )
+
+    cohort_retention = tables.get("cohort_retention") or []
+    check_schema("cohort_retention", cohort_retention)
+    check_non_negative_counts("cohort_retention", cohort_retention, ("cohort_users", "active_users"))
+
+    repeat_purchase = tables.get("repeat_purchase") or []
+    check_schema("repeat_purchase", repeat_purchase)
+    check_non_negative_counts("repeat_purchase", repeat_purchase, ("purchasers", "repeat_purchasers"))
+
+    product_affinity = tables.get("product_affinity") or []
+    check_schema("product_affinity", product_affinity)
+    check_non_negative_counts("product_affinity", product_affinity, ("co_purchase_sessions",))
+
+    time_to_conversion_distribution = tables.get("time_to_conversion_distribution") or []
+    check_schema("time_to_conversion_distribution", time_to_conversion_distribution)
+    check_non_negative_counts("time_to_conversion_distribution", time_to_conversion_distribution, ("conversions",))
+
+    rfm_segmentation = tables.get("rfm_segmentation") or []
+    check_schema("rfm_segmentation", rfm_segmentation)
+    check_non_negative_counts(
+        "rfm_segmentation",
+        rfm_segmentation,
+        ("recency_days", "frequency_90d", "monetary_90d", "r_score", "f_score", "m_score"),
     )
 
     return report

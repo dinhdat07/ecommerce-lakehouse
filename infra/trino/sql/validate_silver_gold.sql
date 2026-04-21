@@ -35,7 +35,12 @@ SELECT
     (SELECT count(*) FROM iceberg.demo.conversion_funnel_daily) AS conversion_funnel_daily_rows,
     (SELECT count(*) FROM iceberg.demo.category_performance_daily) AS category_performance_daily_rows,
     (SELECT count(*) FROM iceberg.demo.session_funnel) AS session_funnel_rows,
-    (SELECT count(*) FROM iceberg.demo.user_conversion_path) AS user_conversion_path_rows;
+    (SELECT count(*) FROM iceberg.demo.user_conversion_path) AS user_conversion_path_rows,
+    (SELECT count(*) FROM iceberg.demo.cohort_retention) AS cohort_retention_rows,
+    (SELECT count(*) FROM iceberg.demo.repeat_purchase) AS repeat_purchase_rows,
+    (SELECT count(*) FROM iceberg.demo.product_affinity) AS product_affinity_rows,
+    (SELECT count(*) FROM iceberg.demo.time_to_conversion_distribution) AS time_to_conversion_distribution_rows,
+    (SELECT count(*) FROM iceberg.demo.rfm_segmentation) AS rfm_segmentation_rows;
 
 -- daily_revenue should match Silver purchase aggregates
 SELECT
@@ -131,3 +136,36 @@ SELECT event_date, path_label, count(*) AS users
 FROM iceberg.demo.user_conversion_path
 GROUP BY 1, 2
 ORDER BY 1, 3 DESC;
+
+-- cohort retention sanity
+SELECT
+    count_if(period_offset < 0) AS negative_period_offsets,
+    count_if(active_users < 0 OR cohort_users < 0) AS negative_cohort_metrics,
+    count_if(retention_rate < 0 OR retention_rate > 1) AS invalid_retention_rates
+FROM iceberg.demo.cohort_retention;
+
+-- repeat purchase sanity
+SELECT
+    count_if(repeat_purchasers > purchasers) AS repeat_gt_purchasers,
+    count_if(repeat_purchase_rate < 0 OR repeat_purchase_rate > 1) AS invalid_repeat_rates
+FROM iceberg.demo.repeat_purchase;
+
+-- product affinity sanity
+SELECT
+    count_if(product_a >= product_b) AS unordered_pairs,
+    count_if(co_purchase_sessions < 0) AS negative_pair_sessions
+FROM iceberg.demo.product_affinity;
+
+-- time-to-conversion sanity
+SELECT
+    event_date,
+    sum(conversions) AS conversions
+FROM iceberg.demo.time_to_conversion_distribution
+GROUP BY 1
+ORDER BY 1;
+
+-- RFM sanity
+SELECT
+    count_if(recency_days < 0 OR frequency_90d < 0 OR monetary_90d < 0) AS negative_rfm_metrics,
+    count_if(r_score NOT BETWEEN 1 AND 5 OR f_score NOT BETWEEN 1 AND 5 OR m_score NOT BETWEEN 1 AND 5) AS invalid_rfm_scores
+FROM iceberg.demo.rfm_segmentation;
