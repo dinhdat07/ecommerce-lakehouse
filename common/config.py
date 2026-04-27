@@ -57,6 +57,7 @@ from common.constants import (
     SPARK_SQL_SHUFFLE_PARTITIONS,
     STREAM_CHECKPOINT_LOCATION,
     STREAM_FAIL_ON_DATA_LOSS,
+    STREAM_GOLD_REFRESH_MODE,
     STREAM_MAX_OFFSETS_PER_TRIGGER,
     STREAM_MODE,
     STREAM_PROGRESS_LOG_PATH,
@@ -125,6 +126,7 @@ class AppConfig:
     stream_timeout_seconds: int
     stream_stop_after_seconds: int
     stream_fail_on_data_loss: bool
+    stream_gold_refresh_mode: str
     replay_batch_size: int
     replay_sleep_seconds: float
     replay_runtime_seconds: int
@@ -251,6 +253,7 @@ def load_config(
         stream_timeout_seconds=STREAM_TIMEOUT_SECONDS,
         stream_stop_after_seconds=STREAM_STOP_AFTER_SECONDS,
         stream_fail_on_data_loss=STREAM_FAIL_ON_DATA_LOSS,
+        stream_gold_refresh_mode=STREAM_GOLD_REFRESH_MODE,
         replay_batch_size=REPLAY_BATCH_SIZE,
         replay_sleep_seconds=REPLAY_SLEEP_SECONDS,
         replay_runtime_seconds=REPLAY_RUNTIME_SECONDS,

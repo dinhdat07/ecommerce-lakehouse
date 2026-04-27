@@ -46,6 +46,30 @@ GOLD_REPEAT_PURCHASE = f"{CATALOG}.{SCHEMA}.repeat_purchase"
 GOLD_PRODUCT_AFFINITY = f"{CATALOG}.{SCHEMA}.product_affinity"
 GOLD_TIME_TO_CONVERSION_DISTRIBUTION = f"{CATALOG}.{SCHEMA}.time_to_conversion_distribution"
 GOLD_RFM_SEGMENTATION = f"{CATALOG}.{SCHEMA}.rfm_segmentation"
+GOLD_REFRESH_MODE_NONE = "none"
+GOLD_REFRESH_MODE_AFFECTED_DATES = "affected_dates"
+GOLD_REFRESH_MODE_FULL = "full"
+GOLD_REFRESH_MODES = {
+    GOLD_REFRESH_MODE_NONE,
+    GOLD_REFRESH_MODE_AFFECTED_DATES,
+    GOLD_REFRESH_MODE_FULL,
+}
+INCREMENTAL_GOLD_TABLES = [
+    GOLD_DAILY_REVENUE,
+    GOLD_TOP_PRODUCTS,
+    GOLD_CONVERSION_FUNNEL,
+    GOLD_CATEGORY_PERFORMANCE,
+    GOLD_SESSION_FUNNEL,
+    GOLD_USER_CONVERSION_PATH,
+]
+ADVANCED_GOLD_TABLES = [
+    GOLD_COHORT_RETENTION,
+    GOLD_REPEAT_PURCHASE,
+    GOLD_PRODUCT_AFFINITY,
+    GOLD_TIME_TO_CONVERSION_DISTRIBUTION,
+    GOLD_RFM_SEGMENTATION,
+]
+ALL_GOLD_TABLES = INCREMENTAL_GOLD_TABLES + ADVANCED_GOLD_TABLES
 HISTORICAL_FILE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>[A-Za-z]{3})\.csv(?:\.gz)?$")
 MONTH_NAME_TO_NUMBER = {month[:3]: f"{index:02d}" for index, month in enumerate(calendar.month_name) if month}
 TABLE_PROPERTIES = {
@@ -1130,16 +1154,39 @@ def delete_affected_partitions(spark: SparkSession, table_name: str, affected_da
     spark.sql(f"DELETE FROM {table_name} WHERE event_date IN ({date_literals})")
 
 
-def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[str, object]:
-    """Recompute Gold tables only for dates touched by newly inserted Silver rows."""
+def refresh_gold_tables(
+    spark: SparkSession,
+    affected_dates: list[str],
+    *,
+    mode: str = GOLD_REFRESH_MODE_FULL,
+) -> dict[str, object]:
+    """Refresh Gold tables using the requested scope."""
+
+    if mode not in GOLD_REFRESH_MODES:
+        raise ValueError(f"Unsupported gold refresh mode: {mode}")
+
+    if mode == GOLD_REFRESH_MODE_NONE:
+        return {
+            "row_counts": {table_name: 0 for table_name in ALL_GOLD_TABLES},
+            "dq_summaries": {},
+            "tables_written": 0,
+            "refresh_mode": mode,
+            "skipped_reason": "configured_to_skip_gold_refresh",
+            "skipped_tables": list(ALL_GOLD_TABLES),
+        }
 
     if not affected_dates:
-        return {"row_counts": {}, "dq_summaries": {}, "tables_written": 0}
+        return {
+            "row_counts": {table_name: 0 for table_name in ALL_GOLD_TABLES},
+            "dq_summaries": {},
+            "tables_written": 0,
+            "refresh_mode": mode,
+            "skipped_reason": "no_affected_dates",
+            "skipped_tables": [],
+        }
 
     silver_slice = spark.table(SILVER_TABLE).where(F.col("event_date").cast("string").isin(affected_dates))
     sessionized = build_sessionized_events(silver_slice)
-    full_silver = spark.table(SILVER_TABLE)
-    sessionized_full = build_sessionized_events(full_silver)
 
     incremental_gold_tables = {
         GOLD_DAILY_REVENUE: build_daily_revenue(silver_slice),
@@ -1149,13 +1196,23 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
         GOLD_SESSION_FUNNEL: build_session_funnel(sessionized),
         GOLD_USER_CONVERSION_PATH: build_user_conversion_path(sessionized),
     }
-    advanced_gold_tables = {
-        GOLD_COHORT_RETENTION: build_cohort_retention(full_silver),
-        GOLD_REPEAT_PURCHASE: build_repeat_purchase(full_silver),
-        GOLD_PRODUCT_AFFINITY: build_product_affinity(sessionized_full),
-        GOLD_TIME_TO_CONVERSION_DISTRIBUTION: build_time_to_conversion_distribution(sessionized_full),
-        GOLD_RFM_SEGMENTATION: build_rfm_segmentation(full_silver),
-    }
+    advanced_gold_tables: dict[str, DataFrame] = {}
+    skipped_tables: list[str] = []
+    skipped_reason = ""
+
+    if mode == GOLD_REFRESH_MODE_FULL:
+        full_silver = spark.table(SILVER_TABLE)
+        sessionized_full = build_sessionized_events(full_silver)
+        advanced_gold_tables = {
+            GOLD_COHORT_RETENTION: build_cohort_retention(full_silver),
+            GOLD_REPEAT_PURCHASE: build_repeat_purchase(full_silver),
+            GOLD_PRODUCT_AFFINITY: build_product_affinity(sessionized_full),
+            GOLD_TIME_TO_CONVERSION_DISTRIBUTION: build_time_to_conversion_distribution(sessionized_full),
+            GOLD_RFM_SEGMENTATION: build_rfm_segmentation(full_silver),
+        }
+    else:
+        skipped_tables = list(ADVANCED_GOLD_TABLES)
+        skipped_reason = "skipped_history_wide_gold_tables_in_affected_dates_mode"
 
     row_counts: dict[str, int] = {}
     dq_summaries: dict[str, dict[str, object]] = {}
@@ -1214,7 +1271,7 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
             append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
         row_counts[table_name] = row_count
 
-    # These tables depend on global purchase/session history, so refresh them from the full Silver state.
+    # These tables depend on global purchase/session history, so only refresh them in full mode.
     for table_name, dataframe in advanced_gold_tables.items():
         row_count = dataframe.count()
         spec = advanced_gold_dq_specs.get(table_name)
@@ -1235,10 +1292,16 @@ def refresh_gold_tables(spark: SparkSession, affected_dates: list[str]) -> dict[
                 append_to_iceberg(table_name, dataframe, partitions=8)
         row_counts[table_name] = row_count
 
+    for table_name in skipped_tables:
+        row_counts[table_name] = 0
+
     return {
         "row_counts": row_counts,
         "dq_summaries": dq_summaries,
         "tables_written": sum(1 for count in row_counts.values() if count > 0),
+        "refresh_mode": mode,
+        "skipped_reason": skipped_reason,
+        "skipped_tables": skipped_tables,
     }
 
 
@@ -1247,6 +1310,7 @@ def process_bronze_batch(
     bronze_batch: DataFrame,
     *,
     append_bronze: bool,
+    gold_refresh_mode: str = GOLD_REFRESH_MODE_FULL,
     bronze_partitions: int = 8,
     silver_partitions: int = 8,
     run_id: str | None = None,
@@ -1360,15 +1424,20 @@ def process_bronze_batch(
     gold_started_at = utc_now_iso()
     gold_timer = stage_timer()
     try:
-        gold_result = refresh_gold_tables(spark, affected_dates)
+        gold_result = refresh_gold_tables(spark, affected_dates, mode=gold_refresh_mode)
         gold_row_counts = gold_result["row_counts"]
         gold_dq_summaries = gold_result["dq_summaries"]
         gold_metrics: dict[str, object] = {
+            "gold_refresh_mode": gold_refresh_mode,
             "affected_dates": len(affected_dates),
             "tables_written": gold_result["tables_written"],
             "rows_written": sum(gold_row_counts.values()),
             "duration_seconds": stage_elapsed_seconds(gold_timer),
+            "gold_refresh_skipped": bool(gold_result.get("skipped_reason")),
         }
+        if gold_result.get("skipped_reason"):
+            gold_metrics["gold_skip_reason"] = gold_result["skipped_reason"]
+            gold_metrics["gold_tables_skipped"] = len(gold_result.get("skipped_tables", []))
         gold_metrics["dq_passed"] = all(
             bool(summary.get("dq_passed", True)) for summary in gold_dq_summaries.values()
         )
@@ -1387,7 +1456,13 @@ def process_bronze_batch(
                 run_id,
                 status="succeeded",
                 metrics=gold_metrics,
-                details={"affected_dates": affected_dates, "dq_tables": gold_dq_summaries},
+                details={
+                    "affected_dates": affected_dates,
+                    "dq_tables": gold_dq_summaries,
+                    "gold_refresh_mode": gold_refresh_mode,
+                    "skipped_reason": gold_result.get("skipped_reason", ""),
+                    "skipped_tables": gold_result.get("skipped_tables", []),
+                },
                 inputs=[SILVER_TABLE],
                 outputs=list(gold_row_counts.keys()),
                 started_at=gold_started_at,
@@ -1479,6 +1554,7 @@ def main() -> None:
                 "bronze_rows_written": process_result["bronze_metrics"]["rows_written"],
                 "silver_rows_written": process_result["silver_metrics"]["rows_written"],
                 "gold_rows_written": process_result["gold_metrics"]["rows_written"],
+                "gold_refresh_mode": process_result["gold_metrics"]["gold_refresh_mode"],
             },
             details={
                 "resume_from": args.resume_from,

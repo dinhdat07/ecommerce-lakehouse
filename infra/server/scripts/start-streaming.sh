@@ -12,6 +12,7 @@ load_server_env "${STORAGE_ENV_FILE}"
 
 STREAM_PID_FILE="${STREAM_PID_FILE:-${SERVER_RUNTIME_DIR}/streaming/${STREAM_QUERY_NAME}.pid}"
 STREAM_LOG_FILE="${STREAM_LOG_FILE:-${SERVER_RUNTIME_DIR}/streaming/${STREAM_QUERY_NAME}.log}"
+STREAM_GOLD_MODE="${STREAM_GOLD_REFRESH_MODE:-affected_dates}"
 mkdir -p "$(dirname "${STREAM_PID_FILE}")" "$(dirname "${STREAM_LOG_FILE}")" "$(dirname "${STREAM_CHECKPOINT_LOCATION}")"
 if [[ -n "${STREAM_PROGRESS_LOG_PATH}" ]]; then
   mkdir -p "$(dirname "${STREAM_PROGRESS_LOG_PATH}")"
@@ -19,6 +20,10 @@ fi
 
 if pid_is_running "${STREAM_PID_FILE}"; then
   fail "streaming job already running with pid $(cat "${STREAM_PID_FILE}")"
+fi
+
+if [[ "${STREAM_GOLD_MODE}" == "full" ]]; then
+  log "warning: STREAM_GOLD_REFRESH_MODE=full may recompute history-wide Gold tables on every microbatch."
 fi
 
 if [[ "${STREAM_RUN_IN_FOREGROUND:-0}" == "1" ]]; then
@@ -35,7 +40,8 @@ if [[ "${STREAM_RUN_IN_FOREGROUND:-0}" == "1" ]]; then
     --timeout-seconds "${STREAM_TIMEOUT_SECONDS}" \
     --stop-after-seconds "${STREAM_STOP_AFTER_SECONDS}" \
     --progress-poll-seconds "${STREAM_PROGRESS_POLL_SECONDS}" \
-    --fail-on-data-loss "${STREAM_FAIL_ON_DATA_LOSS}"
+    --fail-on-data-loss "${STREAM_FAIL_ON_DATA_LOSS}" \
+    --gold-refresh-mode "${STREAM_GOLD_MODE}"
   exit 0
 fi
 
@@ -53,7 +59,8 @@ fi
     --timeout-seconds "${STREAM_TIMEOUT_SECONDS}" \
     --stop-after-seconds "${STREAM_STOP_AFTER_SECONDS}" \
     --progress-poll-seconds "${STREAM_PROGRESS_POLL_SECONDS}" \
-    --fail-on-data-loss "${STREAM_FAIL_ON_DATA_LOSS}"
+    --fail-on-data-loss "${STREAM_FAIL_ON_DATA_LOSS}" \
+    --gold-refresh-mode "${STREAM_GOLD_MODE}"
 ) >>"${STREAM_LOG_FILE}" 2>&1 &
 
 echo "$!" >"${STREAM_PID_FILE}"

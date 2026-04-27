@@ -26,6 +26,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from batch_backfill_to_iceberg import (  # noqa: E402
+    ALL_GOLD_TABLES,
+    GOLD_REFRESH_MODE_AFFECTED_DATES,
+    GOLD_REFRESH_MODE_FULL,
+    GOLD_REFRESH_MODE_NONE,
+    INCREMENTAL_GOLD_TABLES,
     build_streaming_bronze_batch,
     create_tables_if_needed,
     process_bronze_batch,
@@ -37,6 +42,7 @@ from common.constants import (  # noqa: E402
     SPARK_SQL_SHUFFLE_PARTITIONS,
     STREAM_CHECKPOINT_LOCATION,
     STREAM_FAIL_ON_DATA_LOSS,
+    STREAM_GOLD_REFRESH_MODE,
     STREAM_MAX_OFFSETS_PER_TRIGGER,
     STREAM_MODE,
     STREAM_PROGRESS_LOG_PATH,
@@ -132,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         default="true" if STREAM_FAIL_ON_DATA_LOSS else "false",
         help="Kafka failOnDataLoss setting: true or false.",
     )
+    parser.add_argument(
+        "--gold-refresh-mode",
+        choices=[GOLD_REFRESH_MODE_NONE, GOLD_REFRESH_MODE_AFFECTED_DATES, GOLD_REFRESH_MODE_FULL],
+        default=STREAM_GOLD_REFRESH_MODE,
+        help="Gold refresh scope for each streaming microbatch.",
+    )
     parser.add_argument("--bronze-partitions", type=int, default=4, help="Bronze append repartition count.")
     parser.add_argument("--silver-partitions", type=int, default=4, help="Silver append repartition count.")
     return parser.parse_args()
@@ -180,22 +192,16 @@ def _write_json_line(path_value: str, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
-def _batch_outputs() -> list[str]:
-    return [
+def _batch_outputs(gold_refresh_mode: str) -> list[str]:
+    base_outputs = [
         "lakehouse.demo.bronze_events",
         "lakehouse.demo.silver_events",
-        "lakehouse.demo.daily_revenue",
-        "lakehouse.demo.top_products",
-        "lakehouse.demo.conversion_funnel_daily",
-        "lakehouse.demo.category_performance_daily",
-        "lakehouse.demo.session_funnel",
-        "lakehouse.demo.user_conversion_path",
-        "lakehouse.demo.cohort_retention",
-        "lakehouse.demo.repeat_purchase",
-        "lakehouse.demo.product_affinity",
-        "lakehouse.demo.time_to_conversion_distribution",
-        "lakehouse.demo.rfm_segmentation",
     ]
+    if gold_refresh_mode == GOLD_REFRESH_MODE_NONE:
+        return base_outputs
+    if gold_refresh_mode == GOLD_REFRESH_MODE_AFFECTED_DATES:
+        return base_outputs + INCREMENTAL_GOLD_TABLES
+    return base_outputs + ALL_GOLD_TABLES
 
 
 def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
@@ -208,13 +214,36 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
     timer = stage_timer()
     batch_count = batch_df.count()
     if batch_count == 0:
-        STREAM_BATCH_RESULTS.append(
+        skipped_metrics = {
+            "batch_id": batch_id,
+            "run_id": run_id,
+            "status": "skipped",
+            "input_rows": 0,
+            "silver_rows_written": 0,
+            "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+            "gold_rows_written": 0,
+            "affected_dates": [],
+            "gold_refresh_skipped": True,
+            "gold_skip_reason": "empty_microbatch",
+            "duration_seconds": stage_elapsed_seconds(timer),
+        }
+        STREAM_BATCH_RESULTS.append(skipped_metrics)
+        _write_json_line(
+            STREAM_JOB_ARGS.progress_log_path,
             {
+                "type": "streaming_microbatch_skipped",
                 "run_id": run_id,
-                "status": "skipped",
+                "batch_id": batch_id,
+                "mode": STREAM_JOB_ARGS.mode,
                 "input_rows": 0,
-                "duration_seconds": stage_elapsed_seconds(timer),
-            }
+                "silver_rows_written": 0,
+                "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+                "gold_rows_written": 0,
+                "duration_seconds": skipped_metrics["duration_seconds"],
+                "affected_dates": [],
+                "gold_refresh_skipped": True,
+                "skip_reason": "empty_microbatch",
+            },
         )
         return
 
@@ -235,35 +264,48 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
             spark,
             bronze_batch,
             append_bronze=True,
+            gold_refresh_mode=STREAM_JOB_ARGS.gold_refresh_mode,
             bronze_partitions=STREAM_JOB_ARGS.bronze_partitions,
             silver_partitions=STREAM_JOB_ARGS.silver_partitions,
             run_id=run_id,
             input_descriptions=source_files,
         )
         microbatch_metrics = {
+            "batch_id": batch_id,
             "input_rows": batch_count,
-            "affected_dates": len(result["affected_dates"]),
             "silver_rows_written": result["silver_metrics"]["rows_written"],
+            "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
             "gold_rows_written": result["gold_metrics"]["rows_written"],
+            "affected_dates": len(result["affected_dates"]),
+            "gold_refresh_skipped": bool(result["gold_metrics"].get("gold_refresh_skipped", False)),
             "avg_freshness_lag_seconds": float(lag_stats["avg_freshness_lag_seconds"] or 0.0),
             "max_freshness_lag_seconds": float(lag_stats["max_freshness_lag_seconds"] or 0.0),
             "duration_seconds": stage_elapsed_seconds(timer),
         }
+        if result["gold_metrics"].get("gold_skip_reason"):
+            microbatch_metrics["gold_skip_reason"] = str(result["gold_metrics"]["gold_skip_reason"])
         record_stage_event(
             "streaming_microbatch_iceberg",
             run_id,
             status="succeeded",
             metrics=microbatch_metrics,
-            details={"affected_dates": result["affected_dates"], "mode": STREAM_JOB_ARGS.mode},
+            details={
+                "affected_dates": result["affected_dates"],
+                "mode": STREAM_JOB_ARGS.mode,
+                "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+                "gold_skip_reason": result["gold_metrics"].get("gold_skip_reason", ""),
+            },
             inputs=source_files,
-            outputs=_batch_outputs(),
+            outputs=_batch_outputs(STREAM_JOB_ARGS.gold_refresh_mode),
             started_at=started_at,
         )
         STREAM_BATCH_RESULTS.append(
             {
+                "batch_id": batch_id,
                 "run_id": run_id,
                 "status": "succeeded",
                 **microbatch_metrics,
+                "affected_dates": result["affected_dates"],
             }
         )
         _write_json_line(
@@ -273,17 +315,32 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
                 "run_id": run_id,
                 "batch_id": batch_id,
                 "mode": STREAM_JOB_ARGS.mode,
+                "input_rows": batch_count,
+                "silver_rows_written": result["silver_metrics"]["rows_written"],
+                "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+                "gold_rows_written": result["gold_metrics"]["rows_written"],
+                "duration_seconds": microbatch_metrics["duration_seconds"],
                 "metrics": microbatch_metrics,
                 "affected_dates": result["affected_dates"],
+                "gold_refresh_skipped": bool(result["gold_metrics"].get("gold_refresh_skipped", False)),
+                "skip_reason": result["gold_metrics"].get("gold_skip_reason", ""),
             },
         )
         print(
-            f"Processed streaming batch {batch_id}: affected_dates={result['affected_dates']} "
-            f"gold_tables={sorted(result['gold_row_counts'])}"
+            f"Processed streaming batch {batch_id}: input_rows={batch_count} "
+            f"silver_rows_written={result['silver_metrics']['rows_written']} "
+            f"gold_refresh_mode={STREAM_JOB_ARGS.gold_refresh_mode} "
+            f"gold_rows_written={result['gold_metrics']['rows_written']} "
+            f"affected_dates={result['affected_dates']}"
         )
     except Exception as exc:
         microbatch_metrics = {
+            "batch_id": batch_id,
             "input_rows": batch_count,
+            "silver_rows_written": 0,
+            "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+            "gold_rows_written": 0,
+            "affected_dates": 0,
             "duration_seconds": stage_elapsed_seconds(timer),
         }
         record_stage_event(
@@ -291,13 +348,18 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
             run_id,
             status="failed",
             metrics=microbatch_metrics,
-            details={"failure": str(exc), "mode": STREAM_JOB_ARGS.mode},
+            details={
+                "failure": str(exc),
+                "mode": STREAM_JOB_ARGS.mode,
+                "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
+            },
             inputs=source_files,
             outputs=[],
             started_at=started_at,
         )
         STREAM_BATCH_RESULTS.append(
             {
+                "batch_id": batch_id,
                 "run_id": run_id,
                 "status": "failed",
                 **microbatch_metrics,
@@ -310,6 +372,7 @@ def process_microbatch(batch_df: DataFrame, batch_id: int) -> None:
                 "run_id": run_id,
                 "batch_id": batch_id,
                 "mode": STREAM_JOB_ARGS.mode,
+                "gold_refresh_mode": STREAM_JOB_ARGS.gold_refresh_mode,
                 "error": str(exc),
                 "metrics": microbatch_metrics,
             },
@@ -390,6 +453,11 @@ def main() -> None:
 
     args = parse_args()
     STREAM_JOB_ARGS = args
+    if args.mode == "server" and args.gold_refresh_mode == GOLD_REFRESH_MODE_FULL:
+        print(
+            "WARNING: STREAM_GOLD_REFRESH_MODE=full preserves legacy streaming behavior "
+            "and may recompute history-wide Gold tables on every microbatch."
+        )
     spark = build_spark_session(app_name=f"{SPARK_APP_NAME_PREFIX}-{args.mode}-streaming")
     create_tables_if_needed(spark)
     STREAM_BATCH_RESULTS.clear()
@@ -422,6 +490,7 @@ def main() -> None:
 
         run_metrics = {
             **_final_run_metrics(),
+            "gold_refresh_mode": args.gold_refresh_mode,
             "duration_seconds": stage_elapsed_seconds(timer),
         }
         record_stage_event(
@@ -432,12 +501,13 @@ def main() -> None:
             details={
                 "topic": args.topic,
                 "mode": args.mode,
+                "gold_refresh_mode": args.gold_refresh_mode,
                 "query_name": args.query_name,
                 "checkpoint_location": args.checkpoint_location,
                 "stop_reason": stop_reason,
                 "microbatches": STREAM_BATCH_RESULTS,
             },
-            outputs=_batch_outputs(),
+            outputs=_batch_outputs(args.gold_refresh_mode),
             started_at=started_at,
         )
         _write_json_line(
@@ -446,6 +516,7 @@ def main() -> None:
                 "type": "streaming_run_complete",
                 "run_id": run_id,
                 "mode": args.mode,
+                "gold_refresh_mode": args.gold_refresh_mode,
                 "stop_reason": stop_reason,
                 "metrics": run_metrics,
             },
@@ -462,6 +533,7 @@ def main() -> None:
             details={
                 "topic": args.topic,
                 "mode": args.mode,
+                "gold_refresh_mode": args.gold_refresh_mode,
                 "query_name": args.query_name,
                 "checkpoint_location": args.checkpoint_location,
                 "failure": str(exc),
@@ -475,6 +547,7 @@ def main() -> None:
                 "type": "streaming_run_failed",
                 "run_id": run_id,
                 "mode": args.mode,
+                "gold_refresh_mode": args.gold_refresh_mode,
                 "error": str(exc),
             },
         )

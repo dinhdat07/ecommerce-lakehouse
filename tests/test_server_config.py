@@ -14,6 +14,7 @@ def test_load_config_reads_server_profile_fields(monkeypatch):
         "STREAM_TIMEOUT_SECONDS": "0",
         "STREAM_CHECKPOINT_LOCATION": "/srv/checkpoints/streaming/job",
         "STREAM_PROGRESS_LOG_PATH": "/srv/logs/streaming/progress.jsonl",
+        "STREAM_GOLD_REFRESH_MODE": "none",
         "REPLAY_REPEAT_INPUT": "true",
         "REPLAY_RUNTIME_SECONDS": "600",
         "S3_ENDPOINT": "https://minio.example.com",
@@ -39,6 +40,7 @@ def test_load_config_reads_server_profile_fields(monkeypatch):
         assert cfg.stream_timeout_seconds == 0
         assert cfg.stream_checkpoint_location == "/srv/checkpoints/streaming/job"
         assert cfg.stream_progress_log_path == "/srv/logs/streaming/progress.jsonl"
+        assert cfg.stream_gold_refresh_mode == "none"
         assert cfg.replay_repeat_input is True
         assert cfg.replay_runtime_seconds == 600
         assert cfg.s3_endpoint == "https://minio.example.com"
@@ -51,3 +53,16 @@ def test_load_config_reads_server_profile_fields(monkeypatch):
         monkeypatch.undo()
         importlib.reload(constants_module)
         importlib.reload(config_module)
+
+
+def test_stream_gold_refresh_mode_defaults_to_affected_dates_for_server(monkeypatch):
+    monkeypatch.setenv("STREAM_MODE", "server")
+    monkeypatch.delenv("STREAM_GOLD_REFRESH_MODE", raising=False)
+
+    reloaded_constants = importlib.reload(constants_module)
+
+    try:
+        assert reloaded_constants.STREAM_GOLD_REFRESH_MODE == "affected_dates"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(constants_module)
