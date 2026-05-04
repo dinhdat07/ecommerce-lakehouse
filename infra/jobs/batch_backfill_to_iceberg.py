@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import os
 import re
 import sys
 from datetime import date
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
+from pyspark import StorageLevel
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -76,7 +78,27 @@ TABLE_PROPERTIES = {
     "format-version": "2",
     "write.format.default": "parquet",
     "write.parquet.compression-codec": "uncompressed",
+    "write.target-file-size-bytes": "134217728",
+    "write.metadata.delete-after-commit.enabled": "true",
+    "write.metadata.previous-versions-max": "5",
+    "commit.manifest.min-count-to-merge": "5",
+    "commit.manifest.target-size-bytes": "8388608",
 }
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Parse a permissive boolean environment flag."""
+
+    return os.getenv(name, "true" if default else "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_int(name: str, default: int = 0) -> int:
+    """Parse an integer environment flag, falling back on invalid values."""
+
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,14 +127,69 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_spark_local_dir() -> str:
+    """Pick a writable Spark spill directory without defaulting server runs to /tmp."""
+
+    configured = os.getenv("SPARK_LOCAL_DIR") or os.getenv("SPARK_LOCAL_DIRS")
+    if configured:
+        return configured.split(",", 1)[0]
+
+    server_spill_dir = Path("/srv/ecommerce/spark-tmp")
+    try:
+        server_spill_dir.mkdir(parents=True, exist_ok=True)
+        if os.access(server_spill_dir, os.W_OK):
+            return str(server_spill_dir)
+    except OSError:
+        pass
+    return "/tmp"
+
+
 def build_spark_session() -> SparkSession:
     """Create the Spark session used for the batch backfill."""
 
-    spark = SparkSession.builder.appName(f"{SPARK_APP_NAME_PREFIX}-batch-backfill").getOrCreate()
+    builder = (
+        SparkSession.builder.appName(f"{SPARK_APP_NAME_PREFIX}-batch-backfill")
+        .config("spark.sql.adaptive.enabled", os.getenv("SPARK_SQL_ADAPTIVE_ENABLED", "true"))
+        .config(
+            "spark.sql.adaptive.coalescePartitions.enabled",
+            os.getenv("SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS_ENABLED", "true"),
+        )
+        .config(
+            "spark.sql.adaptive.advisoryPartitionSizeInBytes",
+            os.getenv("SPARK_SQL_ADAPTIVE_ADVISORY_PARTITION_SIZE", "32m"),
+        )
+        .config("spark.sql.files.maxPartitionBytes", os.getenv("SPARK_SQL_FILES_MAX_PARTITION_BYTES", "64m"))
+        .config("spark.local.dir", resolve_spark_local_dir())
+    )
+    spark = builder.getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     spark.conf.set("spark.sql.shuffle.partitions", str(SPARK_SQL_SHUFFLE_PARTITIONS))
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
     return spark
+
+
+def log_spark_runtime_config(spark: SparkSession, *, output_path: str = "") -> None:
+    """Log the execution settings that determine shuffle, spill, and storage behavior."""
+
+    conf = spark.sparkContext.getConf()
+    keys = [
+        "spark.master",
+        "spark.local.dir",
+        "spark.sql.shuffle.partitions",
+        "spark.default.parallelism",
+        "spark.driver.memory",
+        "spark.executor.memory",
+        "spark.executor.cores",
+        "spark.sql.adaptive.enabled",
+        "spark.sql.files.maxPartitionBytes",
+        "spark.hadoop.fs.s3a.endpoint",
+        "spark.sql.catalog.lakehouse.s3.endpoint",
+    ]
+    print("Spark execution safety config:")
+    for key in keys:
+        print(f" - {key}={conf.get(key, '<unset>')}")
+    print(f" - S3_ENDPOINT={os.getenv('S3_ENDPOINT', '<unset>')}")
+    print(f" - benchmark_output_path={output_path or os.getenv('BENCHMARK_OUTPUT_ROOT', '<unset>')}")
 
 
 def month_to_date(month_value: str) -> date:
@@ -640,11 +717,46 @@ def build_silver_candidates(bronze_batch: DataFrame) -> DataFrame:
     return deduplicate_silver_candidates(build_silver_base_rows(bronze_batch))
 
 
+def maybe_broadcast_key_projection(keys: DataFrame, *, threshold_env: str, label: str) -> DataFrame:
+    """Broadcast small dedupe key projections only when explicitly configured."""
+
+    threshold = env_int(threshold_env, 0)
+    if threshold <= 0:
+        return keys
+    key_count = keys.count()
+    if key_count <= threshold:
+        print(f"{label} dedupe key projection broadcast enabled: {key_count} <= {threshold}")
+        return F.broadcast(keys)
+    print(f"{label} dedupe key projection broadcast skipped: {key_count} > {threshold}")
+    return keys
+
+
 def insert_new_silver_rows(spark: SparkSession, silver_candidates: DataFrame) -> DataFrame:
     """Return only previously unseen Silver rows."""
 
-    existing_keys = spark.table(SILVER_TABLE).select("dedupe_key")
-    return silver_candidates.join(existing_keys, on="dedupe_key", how="left_anti")
+    affected_dates = [
+        str(row["event_date"])
+        for row in silver_candidates.select("event_date").where(F.col("event_date").isNotNull()).distinct().collect()
+    ]
+    existing_keys = spark.table(SILVER_TABLE).select("event_date", "dedupe_key")
+    if affected_dates:
+        # The dedupe key includes event_time, so matching historical keys must be on the same event_date partition.
+        existing_keys = existing_keys.where(F.col("event_date").cast("string").isin(affected_dates))
+    existing_keys = existing_keys.select("dedupe_key").where(F.col("dedupe_key").isNotNull()).distinct()
+    if env_bool("SILVER_DEDUPE_CACHE_KEYS", False):
+        existing_keys = existing_keys.persist(StorageLevel.MEMORY_ONLY)
+        existing_keys.count()
+    existing_keys = maybe_broadcast_key_projection(
+        existing_keys,
+        threshold_env="SILVER_DEDUPE_BROADCAST_MAX_KEYS",
+        label="Silver",
+    )
+
+    joined = silver_candidates.join(existing_keys, on="dedupe_key", how="left_anti")
+    if env_bool("SILVER_DEDUPE_EXPLAIN", False):
+        print(f"Silver dedupe affected_date_partitions={affected_dates}")
+        joined.explain(mode="formatted")
+    return joined
 
 
 def insert_new_bronze_rows(spark: SparkSession, bronze_batch: DataFrame) -> DataFrame:
@@ -656,8 +768,25 @@ def insert_new_bronze_rows(spark: SparkSession, bronze_batch: DataFrame) -> Data
     before Silver or Gold completed.
     """
 
-    existing_hashes = spark.table(BRONZE_TABLE).select("record_hash")
-    return bronze_batch.join(existing_hashes, on="record_hash", how="left_anti")
+    affected_source_files = [
+        str(row["source_file"])
+        for row in bronze_batch.select("source_file").where(F.col("source_file").isNotNull()).distinct().collect()
+    ]
+    existing_hashes = spark.table(BRONZE_TABLE).select("source_file", "record_hash")
+    if affected_source_files:
+        # `source_file` is part of the record_hash input, so unrelated files cannot contain matching hashes.
+        existing_hashes = existing_hashes.where(F.col("source_file").isin(affected_source_files))
+    existing_hashes = existing_hashes.select("record_hash").where(F.col("record_hash").isNotNull()).distinct()
+    existing_hashes = maybe_broadcast_key_projection(
+        existing_hashes,
+        threshold_env="BRONZE_DEDUPE_BROADCAST_MAX_KEYS",
+        label="Bronze",
+    )
+    joined = bronze_batch.join(existing_hashes, on="record_hash", how="left_anti")
+    if env_bool("BRONZE_DEDUPE_EXPLAIN", False):
+        print(f"Bronze dedupe affected_source_files={affected_source_files}")
+        joined.explain(mode="formatted")
+    return joined
 
 
 def stage_path_label(first_view_at: str, first_cart_at: str, first_purchase_at: str) -> F.Column:
