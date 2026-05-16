@@ -1,4 +1,5 @@
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { sendFeedback } from "../../lib/api";
 import type { ChatMessage } from "../../lib/types";
 import { ResultChart } from "../results/ResultChart";
@@ -25,9 +26,11 @@ export function MessageCard({ message }: Props) {
   return (
     <div className="max-w-4xl rounded-[32px] bg-white px-6 py-6 shadow-panel">
       <div className="flex items-start justify-between gap-4">
-        <div>
+        <div className="w-full">
           <p className="text-sm uppercase tracking-[0.22em] text-ink/45">Assistant</p>
-          <p className="mt-3 whitespace-pre-wrap text-[15px] leading-7 text-ink">{message.text}</p>
+          <div className="mt-3 text-[15px] leading-7 text-ink [&_p]:my-2 [&_ul]:list-disc [&_ul]:my-2 [&_ul]:ml-6 [&_ol]:list-decimal [&_ol]:my-2 [&_ol]:ml-6 [&_li]:my-1 [&_strong]:font-semibold [&_em]:italic">
+            <ReactMarkdown>{message.text}</ReactMarkdown>
+          </div>
         </div>
         <div className="flex gap-2">
           <button

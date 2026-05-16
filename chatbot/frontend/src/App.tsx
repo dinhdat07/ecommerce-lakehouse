@@ -74,7 +74,7 @@ function App() {
       current ? { ...current, messages: [...current.messages, userMessage] } : current,
     );
     setBusy(true);
-    setStatus("planning");
+    setStatus("Thinking");
     setError(null);
     try {
       await streamChatMessage(activeSessionId, message, {
