@@ -4,18 +4,18 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#10203a",
-        shell: "#f4f0e8",
-        accent: "#d76831",
-        moss: "#6b7c58",
-        mist: "#dbe4ea",
+        ink: "#0f172a", // darker modern blue-gray
+        shell: "#f8fafc", // light modern gray for background
+        accent: "#3b82f6", // modern blue accent
+        moss: "#10b981", // emerald green
+        mist: "#e2e8f0", // slate light
       },
       fontFamily: {
-        display: ["Georgia", "ui-serif", "serif"],
-        body: ["'Segoe UI'", "system-ui", "sans-serif"],
+        display: ["Outfit", "sans-serif"],
+        body: ["Inter", "sans-serif"],
       },
       boxShadow: {
-        panel: "0 18px 40px rgba(16, 32, 58, 0.08)",
+        panel: "0 4px 20px rgba(0, 0, 0, 0.05)",
       },
     },
   },

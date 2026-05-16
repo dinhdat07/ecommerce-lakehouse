@@ -12,7 +12,6 @@ function App() {
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
   const [examples, setExamples] = useState<SemanticExample[]>([]);
   const [status, setStatus] = useState<string | null>(null);
-  const [draftSql, setDraftSql] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,7 +39,6 @@ function App() {
     setSessions((current) => [session, ...current]);
     setActiveSessionId(session.id);
     setSessionDetail({ ...session, messages: [] });
-    setDraftSql(null);
     setError(null);
   }
 
@@ -48,7 +46,6 @@ function App() {
     const detail = await getSession(sessionId);
     setActiveSessionId(sessionId);
     setSessionDetail(detail);
-    setDraftSql(null);
     setError(null);
   }
 
@@ -69,12 +66,11 @@ function App() {
     );
     setBusy(true);
     setStatus("planning");
-    setDraftSql(null);
     setError(null);
     try {
       await streamChatMessage(activeSessionId, message, {
         onStatus: (nextStatus) => setStatus(nextStatus),
-        onSql: (sql) => setDraftSql(sql),
+        onSql: () => {}, // Ignore SQL updates
         onComplete: (payload) => {
           const completed = payload as ChatMessage;
           setSessionDetail((current) =>
@@ -89,78 +85,67 @@ function App() {
     } finally {
       setBusy(false);
       setStatus(null);
-      setDraftSql(null);
     }
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#fffefb,_#ebe3d4_45%,_#dbe4ea)] px-4 py-4 text-ink md:px-6">
-      <div className="mx-auto grid max-w-[1600px] gap-4 xl:grid-cols-[300px_minmax(0,1fr)_360px]">
+    <div className="flex h-screen overflow-hidden bg-shell text-ink font-body">
+      {/* Sidebar - fixed */}
+      <div className="w-[280px] flex-shrink-0 h-full overflow-y-auto border-r border-ink/10 bg-white hidden md:block">
         <SessionRail
           sessions={sessions}
           activeSessionId={activeSessionId}
           onSelect={(id) => void openSession(id)}
           onCreate={() => void handleCreateSession()}
         />
+      </div>
 
-        <main className="space-y-4">
-          <StarterPrompts examples={examples} onSelect={(question) => void submitMessage(question)} />
-
-          <section className="rounded-[32px] bg-white/70 p-5 shadow-panel backdrop-blur">
-            <div className="mb-5 flex items-center justify-between">
-              <div>
-                <p className="font-display text-3xl">Executive analyst copilot</p>
-                <p className="text-sm text-ink/70">
+      {/* Main Content Area */}
+      <main className="flex-1 flex flex-col relative h-full w-full bg-shell">
+        {/* Scrollable messages container */}
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-32">
+          <div className="max-w-3xl mx-auto space-y-6">
+            {!sessionDetail?.messages.length && (
+              <div className="text-center py-12 px-4">
+                <h1 className="font-display text-4xl mb-4 font-semibold text-ink">Data Insights AI</h1>
+                <p className="text-ink/60 mb-8 max-w-lg mx-auto leading-relaxed">
                   Ask revenue, conversion, retention, product, category, or RFM questions.
                 </p>
-              </div>
-            </div>
-
-            <div className="space-y-5">
-              {sessionDetail?.messages.length ? (
-                sessionDetail.messages.map((message) => <MessageCard key={message.id} message={message} />)
-              ) : (
-                <div className="rounded-[28px] border border-dashed border-ink/15 bg-shell/60 px-6 py-10 text-center text-ink/65">
-                  Start with one of the suggested prompts or ask your own business question.
-                </div>
-              )}
-              {error && (
-                <div className="rounded-3xl border border-[#d76831]/30 bg-[#fff4ef] px-4 py-3 text-sm text-[#8a471f]">
-                  {error}
-                </div>
-              )}
-            </div>
-          </section>
-
-          <Composer onSubmit={submitMessage} disabled={busy} status={status} />
-        </main>
-
-        <aside className="space-y-4">
-          <section className="rounded-[32px] bg-white p-5 shadow-panel">
-            <p className="text-xs uppercase tracking-[0.22em] text-ink/45">Trust panel</p>
-            <p className="mt-3 font-display text-2xl">What this demo can do</p>
-            <ul className="mt-4 space-y-3 text-sm leading-6 text-ink/75">
-              <li>Answers English-language analytics questions against curated Gold tables.</li>
-              <li>Shows the SQL it used and the result shape it returned.</li>
-              <li>Suggests charts only when the returned data supports them cleanly.</li>
-            </ul>
-          </section>
-
-          <section className="rounded-[32px] bg-ink p-5 text-white shadow-panel">
-            <p className="text-xs uppercase tracking-[0.22em] text-white/55">Live status</p>
-            <p className="mt-3 font-display text-2xl">Current run state</p>
-            <div className="mt-4 rounded-3xl bg-white/10 p-4 text-sm text-white/80">
-              {status ? `Working on: ${status.replace("_", " ")}` : "Idle and ready for the next question."}
-            </div>
-            {draftSql && (
-              <div className="mt-4 rounded-3xl bg-white/8 p-4">
-                <p className="mb-2 text-xs uppercase tracking-[0.22em] text-white/55">Draft SQL</p>
-                <pre className="overflow-auto whitespace-pre-wrap text-xs leading-6 text-white/85">{draftSql}</pre>
+                <StarterPrompts examples={examples} onSelect={(question) => void submitMessage(question)} />
               </div>
             )}
-          </section>
-        </aside>
-      </div>
+
+            <div className="space-y-6">
+              {sessionDetail?.messages.map((message) => (
+                <MessageCard key={message.id} message={message} />
+              ))}
+              
+              {/* Show loading indicator when busy */}
+              {busy && status && (
+                <div className="flex items-center space-x-2 text-ink/50 p-4 bg-white/50 rounded-2xl w-fit animate-pulse border border-ink/5">
+                  <div className="w-2 h-2 bg-accent/70 rounded-full"></div>
+                  <div className="w-2 h-2 bg-accent/70 rounded-full"></div>
+                  <div className="w-2 h-2 bg-accent/70 rounded-full"></div>
+                  <span className="ml-2 text-sm font-medium">{status.replace("_", " ")}...</span>
+                </div>
+              )}
+            </div>
+
+            {error && (
+              <div className="rounded-2xl border border-red-500/30 bg-red-50 px-4 py-3 text-sm text-red-600 mt-4">
+                {error}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Fixed composer */}
+        <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-shell via-shell to-transparent pt-10">
+          <div className="max-w-3xl mx-auto">
+            <Composer onSubmit={submitMessage} disabled={busy} status={null} />
+          </div>
+        </div>
+      </main>
     </div>
   );
 }
