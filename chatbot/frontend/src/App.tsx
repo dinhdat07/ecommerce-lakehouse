@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Composer } from "./features/chat/Composer";
 import { MessageCard } from "./features/chat/MessageCard";
 import { SessionRail } from "./components/SessionRail";
@@ -14,6 +14,15 @@ function App() {
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [sessionDetail?.messages, status]);
 
   useEffect(() => {
     void bootstrap();
@@ -101,10 +110,10 @@ function App() {
       </div>
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col relative h-full w-full bg-shell">
+      <main className="flex-1 flex flex-col h-full w-full bg-shell">
         {/* Scrollable messages container */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-32">
-          <div className="max-w-3xl mx-auto space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8">
+          <div className="max-w-3xl mx-auto space-y-6 pb-2">
             {!sessionDetail?.messages.length && (
               <div className="text-center py-12 px-4">
                 <h1 className="font-display text-4xl mb-4 font-semibold text-ink">Data Insights AI</h1>
@@ -129,6 +138,7 @@ function App() {
                   <span className="ml-2 text-sm font-medium">{status.replace("_", " ")}...</span>
                 </div>
               )}
+              <div ref={messagesEndRef} className="h-1" />
             </div>
 
             {error && (
@@ -139,8 +149,8 @@ function App() {
           </div>
         </div>
 
-        {/* Fixed composer */}
-        <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-shell via-shell to-transparent pt-10">
+        {/* Composer section - now static in flex flow so it never overlaps */}
+        <div className="shrink-0 p-4 bg-shell border-t border-ink/5">
           <div className="max-w-3xl mx-auto">
             <Composer onSubmit={submitMessage} disabled={busy} status={null} />
           </div>
