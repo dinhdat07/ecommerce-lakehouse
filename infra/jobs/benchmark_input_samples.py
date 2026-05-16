@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import batch_backfill_to_iceberg as bb
+from common import benchmark_metrics as bm
 
 SAFE_BENCHMARK_DELETE_PREFIXES = (
     "/tmp/benchmark",
@@ -24,6 +25,23 @@ SAFE_BENCHMARK_DELETE_PREFIXES = (
     "s3://warehouse/benchmarks",
 )
 DEFAULT_INPUT_SAMPLE_ROOT = "s3a://warehouse/benchmarks/input_samples"
+
+
+class RemoteInputFile:
+    """Path-like wrapper that preserves an S3A URI while exposing a file name."""
+
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+    @property
+    def name(self) -> str:
+        return self.uri.rstrip("/").rsplit("/", 1)[-1]
+
+    def stat(self):
+        raise OSError("remote input metadata is not available through pathlib")
+
+    def __str__(self) -> str:
+        return self.uri
 
 
 def parse_bool(value: str | bool | None) -> bool:
@@ -103,6 +121,42 @@ def _file_descriptor(path: Path) -> dict[str, Any]:
     return descriptor
 
 
+def _is_remote_uri(path: str) -> bool:
+    return "://" in path
+
+
+def _discover_remote_input_files(spark, input_dir: str, start_month: str, end_month: str) -> tuple[list[RemoteInputFile], list[str]]:
+    """Recursively discover historical CSV files under an S3A-compatible input prefix."""
+
+    expected_months = bb.iter_months(start_month, end_month)
+    selected_files: list[RemoteInputFile] = []
+    available_months: set[str] = set()
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    root = jvm.org.apache.hadoop.fs.Path(input_dir.rstrip("/"))
+    fs = root.getFileSystem(hadoop_conf)
+    if not fs.exists(root):
+        return [], expected_months
+
+    iterator = fs.listFiles(root, True)
+    while iterator.hasNext():
+        status = iterator.next()
+        uri = status.getPath().toString()
+        name = uri.rsplit("/", 1)[-1]
+        if not (name.endswith(".csv") or name.endswith(".csv.gz")):
+            continue
+        source_month = bb.extract_source_month(Path(name))
+        if source_month is None:
+            continue
+        if start_month <= source_month <= end_month:
+            selected_files.append(RemoteInputFile(uri))
+            available_months.add(source_month)
+
+    selected_files.sort(key=lambda item: item.uri)
+    missing_months = [month for month in expected_months if month not in available_months]
+    return selected_files, missing_months
+
+
 def _git_or_env_version() -> str:
     if os.getenv("BENCHMARK_INPUT_SAMPLE_CODE_VERSION"):
         return os.environ["BENCHMARK_INPUT_SAMPLE_CODE_VERSION"]
@@ -179,11 +233,12 @@ def _write_sample_cache(
 ) -> tuple[Any, dict[str, Any]]:
     started = time.perf_counter()
     delete_output_path(spark, paths["base_path"])
-    dataframe.coalesce(int(os.getenv("BENCHMARK_INPUT_SAMPLE_WRITE_PARTITIONS", "4"))).write.mode("overwrite").parquet(
-        paths["data_path"]
-    )
+    with bm.timed_action(spark, "input_sample_write_parquet", phase="input_sample", details={"path": paths["data_path"]}):
+        dataframe.coalesce(int(os.getenv("BENCHMARK_INPUT_SAMPLE_WRITE_PARTITIONS", "4"))).write.mode("overwrite").parquet(
+            paths["data_path"]
+        )
     staged = spark.read.parquet(paths["data_path"])
-    benchmark_row_count = staged.count()
+    benchmark_row_count = bm.timed_count(staged, "input_sample_benchmark_count", phase="input_sample")
     metadata = {
         "enabled": True,
         "action": action,
@@ -215,6 +270,7 @@ def _stage_run_input(spark, dataframe, args: argparse.Namespace) -> tuple[Any, d
     metadata: dict[str, Any] = {
         "staging_enabled": staging_enabled,
         "staging_path": args.staging_path if staging_enabled else None,
+        "staging_action": "disabled",
         "staging_seconds": 0.0,
         "staging_storage_bytes": 0,
     }
@@ -224,18 +280,63 @@ def _stage_run_input(spark, dataframe, args: argparse.Namespace) -> tuple[Any, d
         raise SystemExit("--staging-path is required when --staging-enabled=true")
     started = time.perf_counter()
     delete_output_path(spark, args.staging_path)
-    dataframe.write.mode("overwrite").format("parquet").save(args.staging_path)
+    staging_partitions = int(
+        os.getenv(
+            "BENCHMARK_STAGING_WRITE_PARTITIONS",
+            os.getenv("BENCHMARK_INPUT_SAMPLE_WRITE_PARTITIONS", os.getenv("BENCHMARK_WRITE_PARTITIONS", "0")),
+        )
+    )
+    staged_input = dataframe.repartition(staging_partitions) if staging_partitions > 0 else dataframe
+    with bm.timed_action(
+        spark,
+        "raw_gzip_stage_to_parquet_write",
+        phase="raw_ingest_cost",
+        details={"path": args.staging_path, "write_partitions": staging_partitions or None},
+    ):
+        staged_input.write.mode("overwrite").format("parquet").save(args.staging_path)
     staged = spark.read.parquet(args.staging_path)
     metadata["staging_seconds"] = round(time.perf_counter() - started, 3)
     metadata["staging_storage_bytes"] = path_size_bytes(spark, args.staging_path)
+    metadata["staging_action"] = "created"
     return staged, metadata
 
 
-def _discover_dataset(args: argparse.Namespace) -> tuple[str, list[Path], list[str], str | None, str]:
-    input_dir = Path(args.input_dir)
-    input_files, missing_months = bb.discover_input_files(input_dir, args.start_month, args.end_month)
+def _read_reusable_staging(spark, args: argparse.Namespace) -> tuple[Any, dict[str, Any]] | None:
+    if not parse_bool(args.staging_enabled) or not parse_bool(args.staging_reuse_existing):
+        return None
+    if not args.staging_path:
+        raise SystemExit("--staging-path is required when --staging-reuse-existing=true")
+    if not path_exists(spark, args.staging_path):
+        return None
+    started = time.perf_counter()
+    staged = spark.read.parquet(args.staging_path)
+    benchmark_count = bm.timed_count(staged, "staged_parquet_reuse_count", phase="input_resolution", details={"path": args.staging_path})
+    metadata = {
+        "staging_enabled": True,
+        "staging_path": args.staging_path,
+        "staging_action": "reused",
+        "staging_seconds": round(time.perf_counter() - started, 3),
+        "staging_storage_bytes": path_size_bytes(spark, args.staging_path),
+        "benchmark_count": benchmark_count,
+    }
+    return staged, metadata
+
+
+def _discover_dataset(spark, args: argparse.Namespace) -> tuple[str, list[Any], list[str], str | None, str]:
+    if _is_remote_uri(args.input_dir):
+        input_files, missing_months = _discover_remote_input_files(
+            spark,
+            args.input_dir,
+            args.start_month,
+            args.end_month,
+        )
+        input_dir_label = args.input_dir
+    else:
+        input_dir = Path(args.input_dir)
+        input_files, missing_months = bb.discover_input_files(input_dir, args.start_month, args.end_month)
+        input_dir_label = str(input_dir)
     if args.mode == "full" and not input_files:
-        raise SystemExit(f"No input files under {input_dir} for {args.start_month}..{args.end_month}")
+        raise SystemExit(f"No input files under {input_dir_label} for {args.start_month}..{args.end_month}")
 
     if args.mode == "demo" or (args.mode == "auto" and not input_files):
         sample_path = Path(args.sample_file)
@@ -250,9 +351,25 @@ def resolve_benchmark_input(spark, args: argparse.Namespace) -> dict[str, Any]:
     """Resolve benchmark input, preferring a reusable sampled Parquet cache."""
 
     started = time.perf_counter()
-    mode, input_files, missing_months, source_month_override, batch_run_id = _discover_dataset(args)
+    mode, input_files, missing_months, source_month_override, batch_run_id = _discover_dataset(spark, args)
     input_sample_enabled = parse_bool(args.input_sample_enabled) and parse_bool(args.subset_enabled) and args.subset_mode == "fraction"
     input_sample_metadata: dict[str, Any] = {"enabled": input_sample_enabled, "action": "disabled"}
+
+    reusable_staging = _read_reusable_staging(spark, args)
+    if reusable_staging is not None:
+        bronze_batch, staging = reusable_staging
+        benchmark_count = int(staging["benchmark_count"])
+        return {
+            "mode": mode,
+            "input_files": input_files,
+            "missing_months": missing_months,
+            "bronze_batch": bronze_batch,
+            "input_row_count": int(args.input_row_count_override) if args.input_row_count_override else benchmark_count,
+            "benchmark_row_count": benchmark_count,
+            "raw_read_seconds": 0.0,
+            "staging": staging,
+            "input_sample": input_sample_metadata,
+        }
 
     if input_sample_enabled:
         descriptor = _descriptor(args, mode=mode, input_files=input_files)
@@ -306,7 +423,11 @@ def resolve_benchmark_input(spark, args: argparse.Namespace) -> dict[str, Any]:
             batch_run_id=batch_run_id,
             source_month_override=source_month_override,
         )
-        input_count = int(args.input_row_count_override) if args.input_row_count_override else input_bronze_batch.count()
+        input_count = (
+            int(args.input_row_count_override)
+            if args.input_row_count_override
+            else bm.timed_count(input_bronze_batch, "raw_input_count", phase="raw_ingest_cost")
+        )
         sampled = _apply_optional_fraction_subset(input_bronze_batch, args)
         bronze_batch, input_sample_metadata = _write_sample_cache(
             spark,
@@ -335,10 +456,14 @@ def resolve_benchmark_input(spark, args: argparse.Namespace) -> dict[str, Any]:
         batch_run_id=batch_run_id,
         source_month_override=source_month_override,
     )
-    input_count = int(args.input_row_count_override) if args.input_row_count_override else input_bronze_batch.count()
+    input_count = (
+        int(args.input_row_count_override)
+        if args.input_row_count_override
+        else bm.timed_count(input_bronze_batch, "raw_input_count", phase="raw_ingest_cost")
+    )
     selected = _apply_optional_fraction_subset(input_bronze_batch, args)
     bronze_batch, staging = _stage_run_input(spark, selected, args)
-    benchmark_count = bronze_batch.count()
+    benchmark_count = bm.timed_count(bronze_batch, "benchmark_input_count", phase="input_resolution")
     return {
         "mode": mode,
         "input_files": input_files,
@@ -358,3 +483,4 @@ def add_input_sample_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input-sample-code-version", default=os.getenv("BENCHMARK_INPUT_SAMPLE_CODE_VERSION", ""))
     parser.add_argument("--input-sample-bootstrap-path", default=os.getenv("BENCHMARK_INPUT_SAMPLE_BOOTSTRAP_PATH", ""))
     parser.add_argument("--input-row-count-override", default=os.getenv("BENCHMARK_INPUT_ROW_COUNT_OVERRIDE", ""))
+    parser.add_argument("--staging-reuse-existing", default=os.getenv("BENCHMARK_STAGING_REUSE_EXISTING", "false"))

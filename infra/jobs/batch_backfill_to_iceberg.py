@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - alternate import when running as a pac
     from infra.jobs.dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality
 
 from common.constants import SPARK_APP_NAME_PREFIX, SPARK_SQL_SHUFFLE_PARTITIONS  # noqa: E402
+from common import benchmark_metrics as bm  # noqa: E402
 from common.observability import record_stage_event, stage_elapsed_seconds, stage_timer  # noqa: E402
 from common.runtime import utc_now_iso  # noqa: E402
 
@@ -268,7 +269,23 @@ def append_to_iceberg(table_name: str, dataframe: DataFrame, partitions: int | N
     """
 
     prepared = dataframe.repartition(partitions) if partitions is not None else dataframe
-    prepared.writeTo(table_name).option("fanout-enabled", "true").append()
+    action = f"iceberg_append_{table_name.split('.')[-1]}"
+    with bm.timed_action(dataframe.sparkSession, action, phase="iceberg_write", details={"table": table_name, "partitions": partitions}):
+        prepared.writeTo(table_name).option("fanout-enabled", "true").append()
+
+
+def materialize_for_benchmark_reuse(dataframe: DataFrame) -> DataFrame:
+    """Persist shared benchmark DataFrames only when explicitly enabled."""
+
+    if env_bool("BENCHMARK_CACHE_DATAFRAMES", False):
+        level_name = os.getenv("BENCHMARK_CACHE_STORAGE_LEVEL", "DISK_ONLY").upper()
+        return dataframe.persist(getattr(StorageLevel, level_name, StorageLevel.DISK_ONLY))
+    return dataframe
+
+
+def release_benchmark_cache(dataframe: DataFrame | None) -> None:
+    if dataframe is not None and env_bool("BENCHMARK_CACHE_DATAFRAMES", False):
+        dataframe.unpersist(blocking=False)
 
 
 def infer_source_month_from_event_time(column_name: str) -> Column:
@@ -734,10 +751,11 @@ def maybe_broadcast_key_projection(keys: DataFrame, *, threshold_env: str, label
 def insert_new_silver_rows(spark: SparkSession, silver_candidates: DataFrame) -> DataFrame:
     """Return only previously unseen Silver rows."""
 
-    affected_dates = [
-        str(row["event_date"])
-        for row in silver_candidates.select("event_date").where(F.col("event_date").isNotNull()).distinct().collect()
-    ]
+    with bm.timed_action(silver_candidates.sparkSession, "silver_affected_dates_collect", phase="silver_dedupe"):
+        affected_dates = [
+            str(row["event_date"])
+            for row in silver_candidates.select("event_date").where(F.col("event_date").isNotNull()).distinct().collect()
+        ]
     existing_keys = spark.table(SILVER_TABLE).select("event_date", "dedupe_key")
     if affected_dates:
         # The dedupe key includes event_time, so matching historical keys must be on the same event_date partition.
@@ -768,10 +786,11 @@ def insert_new_bronze_rows(spark: SparkSession, bronze_batch: DataFrame) -> Data
     before Silver or Gold completed.
     """
 
-    affected_source_files = [
-        str(row["source_file"])
-        for row in bronze_batch.select("source_file").where(F.col("source_file").isNotNull()).distinct().collect()
-    ]
+    with bm.timed_action(bronze_batch.sparkSession, "bronze_source_files_collect", phase="bronze_ingest"):
+        affected_source_files = [
+            str(row["source_file"])
+            for row in bronze_batch.select("source_file").where(F.col("source_file").isNotNull()).distinct().collect()
+        ]
     existing_hashes = spark.table(BRONZE_TABLE).select("source_file", "record_hash")
     if affected_source_files:
         # `source_file` is part of the record_hash input, so unrelated files cannot contain matching hashes.
@@ -1314,8 +1333,10 @@ def refresh_gold_tables(
             "skipped_tables": [],
         }
 
-    silver_slice = spark.table(SILVER_TABLE).where(F.col("event_date").cast("string").isin(affected_dates))
-    sessionized = build_sessionized_events(silver_slice)
+    silver_slice = materialize_for_benchmark_reuse(
+        spark.table(SILVER_TABLE).where(F.col("event_date").cast("string").isin(affected_dates))
+    )
+    sessionized = materialize_for_benchmark_reuse(build_sessionized_events(silver_slice))
 
     incremental_gold_tables = {
         GOLD_DAILY_REVENUE: build_daily_revenue(silver_slice),
@@ -1386,43 +1407,57 @@ def refresh_gold_tables(
         ),
     }
     for table_name, dataframe in incremental_gold_tables.items():
-        row_count = dataframe.count()
-        spec = incremental_gold_dq_specs.get(table_name)
-        if spec:
-            short_name, cols = spec[0], spec[1]
-            dq_summaries[short_name] = summarize_gold_dataframe_quality(
-                dataframe,
-                name=short_name,
-                columns=cols,
-            )
-        delete_affected_partitions(spark, table_name, affected_dates)
-        if row_count > 0:
-            append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
-        row_counts[table_name] = row_count
+        dataframe = materialize_for_benchmark_reuse(dataframe)
+        try:
+            row_count = bm.timed_count(dataframe, f"iceberg_gold_{table_name.split('.')[-1]}_count", phase="iceberg_gold")
+            spec = incremental_gold_dq_specs.get(table_name)
+            if spec:
+                short_name, cols = spec[0], spec[1]
+                dq_summaries[short_name] = summarize_gold_dataframe_quality(
+                    dataframe,
+                    name=short_name,
+                    columns=cols,
+                )
+            delete_affected_partitions(spark, table_name, affected_dates)
+            if row_count > 0:
+                append_to_iceberg(table_name, dataframe, partitions=max(len(affected_dates), 1))
+            row_counts[table_name] = row_count
+        finally:
+            release_benchmark_cache(dataframe)
 
     # These tables depend on global purchase/session history, so only refresh them in full mode.
     for table_name, dataframe in advanced_gold_tables.items():
-        row_count = dataframe.count()
-        spec = advanced_gold_dq_specs.get(table_name)
-        if spec:
-            short_name, cols, required_cols = spec
-            dq_summaries[short_name] = summarize_gold_dataframe_quality(
-                dataframe,
-                name=short_name,
-                columns=cols,
-                required_columns=required_cols,
-            )
-        delete_all_rows(spark, table_name)
-        if row_count > 0:
-            if table_name == GOLD_TIME_TO_CONVERSION_DISTRIBUTION:
-                partition_count = max(dataframe.select("event_date").distinct().count(), 1)
-                append_to_iceberg(table_name, dataframe, partitions=partition_count)
-            else:
-                append_to_iceberg(table_name, dataframe, partitions=8)
-        row_counts[table_name] = row_count
+        dataframe = materialize_for_benchmark_reuse(dataframe)
+        try:
+            row_count = bm.timed_count(dataframe, f"iceberg_gold_{table_name.split('.')[-1]}_count", phase="iceberg_gold")
+            spec = advanced_gold_dq_specs.get(table_name)
+            if spec:
+                short_name, cols, required_cols = spec
+                dq_summaries[short_name] = summarize_gold_dataframe_quality(
+                    dataframe,
+                    name=short_name,
+                    columns=cols,
+                    required_columns=required_cols,
+                )
+            delete_all_rows(spark, table_name)
+            if row_count > 0:
+                if table_name == GOLD_TIME_TO_CONVERSION_DISTRIBUTION:
+                    partition_count = max(dataframe.select("event_date").distinct().count(), 1)
+                    append_to_iceberg(table_name, dataframe, partitions=partition_count)
+                else:
+                    append_to_iceberg(table_name, dataframe, partitions=8)
+            row_counts[table_name] = row_count
+        finally:
+            release_benchmark_cache(dataframe)
 
     for table_name in skipped_tables:
         row_counts[table_name] = 0
+
+    release_benchmark_cache(silver_slice)
+    release_benchmark_cache(sessionized)
+    if mode == GOLD_REFRESH_MODE_FULL:
+        release_benchmark_cache(full_silver)
+        release_benchmark_cache(sessionized_full)
 
     return {
         "row_counts": row_counts,
@@ -1448,14 +1483,16 @@ def process_bronze_batch(
     """Process a Bronze DataFrame through Silver and Gold using the shared Phase 1 logic."""
 
     bronze_inputs = list(input_descriptions or [])
-    bronze_rows_seen = bronze_batch.count()
+    bronze_batch = materialize_for_benchmark_reuse(bronze_batch)
+    bronze_rows_seen = bm.timed_count(bronze_batch, "iceberg_bronze_rows_seen_count", phase="iceberg_bronze")
 
     bronze_started_at = utc_now_iso()
     bronze_timer = stage_timer()
     try:
         if append_bronze:
             new_bronze_rows = insert_new_bronze_rows(spark, bronze_batch)
-            bronze_rows_written = new_bronze_rows.count()
+            new_bronze_rows = materialize_for_benchmark_reuse(new_bronze_rows)
+            bronze_rows_written = bm.timed_count(new_bronze_rows, "iceberg_bronze_rows_written_count", phase="iceberg_bronze")
             if bronze_rows_written > 0:
                 append_to_iceberg(BRONZE_TABLE, new_bronze_rows, partitions=bronze_partitions)
         else:
@@ -1496,21 +1533,26 @@ def process_bronze_batch(
             )
         raise
 
+    silver_base_rows = None
+    silver_candidates = None
+    inserted_silver_rows = None
     silver_started_at = utc_now_iso()
     silver_timer = stage_timer()
     try:
-        silver_base_rows = build_silver_base_rows(bronze_batch)
-        silver_candidates = deduplicate_silver_candidates(silver_base_rows)
-        inserted_silver_rows = insert_new_silver_rows(spark, silver_candidates)
-        silver_candidates_count = silver_candidates.count()
-        silver_rows_written = inserted_silver_rows.count()
+        silver_base_rows = materialize_for_benchmark_reuse(build_silver_base_rows(bronze_batch))
+        with bm.timed_action(spark, "iceberg_silver_deduplicate", phase="iceberg_silver"):
+            silver_candidates = materialize_for_benchmark_reuse(deduplicate_silver_candidates(silver_base_rows))
+        inserted_silver_rows = materialize_for_benchmark_reuse(insert_new_silver_rows(spark, silver_candidates))
+        silver_candidates_count = bm.timed_count(silver_candidates, "iceberg_silver_candidates_count", phase="iceberg_silver")
+        silver_rows_written = bm.timed_count(inserted_silver_rows, "iceberg_silver_rows_written_count", phase="iceberg_silver")
         silver_dq_summary = summarize_silver_dataframe_quality(
             silver_base_rows,
             inserted_silver_rows,
         )
-        affected_dates = sorted(
-            str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect()
-        )
+        with bm.timed_action(spark, "iceberg_silver_written_dates_collect", phase="iceberg_silver"):
+            affected_dates = sorted(
+                str(row["event_date"]) for row in inserted_silver_rows.select("event_date").distinct().collect()
+            )
         if affected_dates:
             append_to_iceberg(SILVER_TABLE, inserted_silver_rows, partitions=silver_partitions)
         silver_metrics = {
@@ -1549,6 +1591,11 @@ def process_bronze_batch(
                 started_at=silver_started_at,
             )
         raise
+    finally:
+        release_benchmark_cache(bronze_batch)
+        release_benchmark_cache(silver_base_rows)
+        release_benchmark_cache(silver_candidates)
+        release_benchmark_cache(inserted_silver_rows)
 
     gold_started_at = utc_now_iso()
     gold_timer = stage_timer()

@@ -1,0 +1,30 @@
+services:
+  chatbot-backend:
+    container_name: chatbot-backend
+    build:
+      context: ../../..
+      dockerfile: chatbot/backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../env/chatbot.env
+    volumes:
+      - ../../../chatbot/backend/data:/app/chatbot/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "100.123.190.84:8090:8090"
+    security_opt:
+      - no-new-privileges:true
+
+  chatbot-frontend:
+    container_name: chatbot-frontend
+    build:
+      context: ../../..
+      dockerfile: chatbot/frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - chatbot-backend
+    ports:
+      - "100.123.190.84:8089:8089"
+    security_opt:
+      - no-new-privileges:true

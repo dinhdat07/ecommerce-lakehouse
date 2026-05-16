@@ -402,6 +402,7 @@ run_system_benchmark_phase() {
     --sample-seed "${BENCHMARK_SAMPLE_SEED}" \
     --staging-enabled "${BENCHMARK_STAGING_ENABLED}" \
     --staging-path "${BENCHMARK_STAGING_ROOT}/${staging_suffix}" \
+    --staging-reuse-existing "${BENCHMARK_STAGING_REUSE_EXISTING:-false}" \
     --input-sample-enabled "${BENCHMARK_INPUT_SAMPLE_ENABLED}" \
     --input-sample-root "${BENCHMARK_INPUT_SAMPLE_ROOT}" \
     --input-sample-bootstrap-path "${BENCHMARK_INPUT_SAMPLE_BOOTSTRAP_PATH:-}" \
@@ -586,6 +587,7 @@ run_with_disk_watchdog "streaming replay benchmark" spark_submit_iceberg_job "${
   --sample-seed "${BENCHMARK_SAMPLE_SEED}" \
   --staging-enabled "${BENCHMARK_STAGING_ENABLED}" \
   --staging-path "${BENCHMARK_STAGING_ROOT}/processing_input" \
+  --staging-reuse-existing "${BENCHMARK_STAGING_REUSE_EXISTING:-false}" \
   --input-sample-enabled "${BENCHMARK_INPUT_SAMPLE_ENABLED}" \
   --input-sample-root "${BENCHMARK_INPUT_SAMPLE_ROOT}" \
   --input-sample-bootstrap-path "" \

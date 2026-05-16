@@ -1,0 +1,130 @@
+{
+  "tables": [
+    {
+      "name": "daily_revenue",
+      "description": "Daily revenue and purchase volume across the ecommerce business.",
+      "grain": "One row per event_date.",
+      "key_columns": ["event_date"],
+      "dimensions": ["event_date"],
+      "metrics": ["purchase_revenue", "purchase_count"],
+      "examples": ["Daily revenue trend", "Average purchase value by day"]
+    },
+    {
+      "name": "top_products",
+      "description": "Product-level purchase performance for ranking and merchandising analysis.",
+      "grain": "One row per product per date aggregation window.",
+      "key_columns": ["product_id", "event_date"],
+      "dimensions": ["product_id", "event_date"],
+      "metrics": ["purchase_revenue", "purchase_count"],
+      "examples": ["Top products by revenue", "Top products by purchases"]
+    },
+    {
+      "name": "conversion_funnel_daily",
+      "description": "Daily funnel activity including views, carts, and purchases.",
+      "grain": "One row per event_date.",
+      "key_columns": ["event_date"],
+      "dimensions": ["event_date"],
+      "metrics": ["views", "carts", "purchases", "view_to_cart_rate", "cart_to_purchase_rate", "view_to_purchase_rate"],
+      "examples": ["Funnel trend", "View-to-purchase rate"]
+    },
+    {
+      "name": "category_performance_daily",
+      "description": "Category-level revenue and purchase performance by day.",
+      "grain": "One row per category_code per event_date.",
+      "key_columns": ["category_code", "event_date"],
+      "dimensions": ["category_code", "event_date"],
+      "metrics": ["purchase_revenue", "purchase_count"],
+      "examples": ["Top categories by revenue", "Category revenue mix"]
+    },
+    {
+      "name": "session_funnel",
+      "description": "Session-level conversion outcomes and path labels.",
+      "grain": "One row per session_id.",
+      "key_columns": ["session_id"],
+      "dimensions": ["event_date", "path_label", "converted"],
+      "metrics": ["session_id"],
+      "examples": ["Session conversion trend", "Session path distribution"]
+    },
+    {
+      "name": "user_conversion_path",
+      "description": "User conversion journey summaries.",
+      "grain": "One row per user_id conversion path summary.",
+      "key_columns": ["user_id"],
+      "dimensions": ["path_label"],
+      "metrics": ["user_id"],
+      "examples": ["Common conversion paths"]
+    },
+    {
+      "name": "cohort_retention",
+      "description": "Retention rates by acquisition cohort and period offset.",
+      "grain": "One row per cohort_month and period_offset.",
+      "key_columns": ["cohort_month", "period_offset"],
+      "dimensions": ["cohort_month", "period_offset"],
+      "metrics": ["retention_rate", "retained_users", "cohort_size"],
+      "examples": ["Cohort retention matrix", "Retention over time"]
+    },
+    {
+      "name": "repeat_purchase",
+      "description": "Repeat purchase behavior over time.",
+      "grain": "One row per activity_month.",
+      "key_columns": ["activity_month"],
+      "dimensions": ["activity_month"],
+      "metrics": ["repeat_purchase_rate", "repeat_purchasers", "purchasers"],
+      "examples": ["Repeat purchase trend"]
+    },
+    {
+      "name": "product_affinity",
+      "description": "Co-purchase affinity between product pairs.",
+      "grain": "One row per product_a and product_b pair.",
+      "key_columns": ["product_a", "product_b"],
+      "dimensions": ["product_a", "product_b"],
+      "metrics": ["affinity_lift", "co_purchase_count"],
+      "examples": ["Cross-sell pairs", "Affinity matrix"]
+    },
+    {
+      "name": "time_to_conversion_distribution",
+      "description": "Distribution of time-to-conversion buckets.",
+      "grain": "One row per time_bucket.",
+      "key_columns": ["time_bucket"],
+      "dimensions": ["time_bucket"],
+      "metrics": ["conversions"],
+      "examples": ["Conversion latency distribution"]
+    },
+    {
+      "name": "rfm_segmentation",
+      "description": "Customer segments derived from recency, frequency, and monetary scores.",
+      "grain": "One row per user_id.",
+      "key_columns": ["user_id"],
+      "dimensions": ["rfm_segment"],
+      "metrics": ["recency_score", "frequency_score", "monetary_score"],
+      "examples": ["Segment mix", "High-value customer segments"]
+    }
+  ],
+  "starter_questions": [
+    {
+      "id": "revenue-trend",
+      "question": "Show the daily revenue trend and purchase volume.",
+      "description": "Executive view of overall commercial performance."
+    },
+    {
+      "id": "category-leaders",
+      "question": "Which categories generate the most revenue?",
+      "description": "Merchandising and category mix."
+    },
+    {
+      "id": "funnel-health",
+      "question": "How is the conversion funnel trending over time?",
+      "description": "Views, carts, purchases, and conversion rates."
+    },
+    {
+      "id": "retention",
+      "question": "Summarize cohort retention performance.",
+      "description": "Customer retention by acquisition cohort."
+    },
+    {
+      "id": "rfm",
+      "question": "What does the RFM segment mix look like?",
+      "description": "Customer quality and segmentation."
+    }
+  ]
+}

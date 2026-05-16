@@ -23,6 +23,7 @@ from common.dq_checks import (  # noqa: E402
     DQ_SEVERITY_WARNING,
     SILVER_REQUIRED_COLUMNS,
 )
+from common import benchmark_metrics as bm  # noqa: E402
 
 DQ_FAIL_ON_ERROR = os.getenv("DQ_FAIL_ON_ERROR", "true").strip().lower() in ("1", "true", "yes", "y")
 DEFAULT_SAMPLE_LIMIT = 5
@@ -70,31 +71,50 @@ def summarize_silver_dataframe_quality(
     required_columns = SILVER_REQUIRED_COLUMNS + ("event_id", "dedupe_key")
     missing_columns = _missing_columns(silver_publish_rows, required_columns)
 
-    base_count = silver_base_rows.count()
-    valid_pre_dedupe = silver_base_rows.where(
-        F.col("event_time").isNotNull() & F.col("event_type").isNotNull()
-    ).count()
-    publish_count = silver_publish_rows.count()
+    with bm.timed_action(silver_base_rows.sparkSession, f"{stage}_dq_base_counts", phase="dq"):
+        base_row = (
+            silver_base_rows.agg(
+                F.count(F.lit(1)).alias("base_count"),
+                F.sum(F.when(F.col("event_time").isNotNull() & F.col("event_type").isNotNull(), 1).otherwise(0)).alias(
+                    "valid_pre_dedupe"
+                ),
+                F.sum(
+                    F.when(F.col("_raw_event_time").isNotNull() & F.col("event_time").isNull(), 1).otherwise(0)
+                ).alias("invalid_timestamp"),
+            )
+            .collect()[0]
+        )
+    base_count = int(base_row["base_count"])
+    valid_pre_dedupe = int(base_row["valid_pre_dedupe"])
+    invalid_timestamp = int(base_row["invalid_timestamp"])
+
+    with bm.timed_action(silver_publish_rows.sparkSession, f"{stage}_dq_publish_counts", phase="dq"):
+        publish_row = (
+            silver_publish_rows.agg(
+                F.count(F.lit(1)).alias("publish_count"),
+                F.sum(
+                    F.when(F.col("event_type").isNotNull() & (~F.col("event_type").isin(*sorted(ALLOWED_EVENT_TYPES))), 1).otherwise(0)
+                ).alias("invalid_event_type"),
+                F.sum(F.when(F.col("event_time").isNull(), 1).otherwise(0)).alias("null_event_time"),
+                F.sum(F.when(F.col("event_date").isNull(), 1).otherwise(0)).alias("null_event_date"),
+                F.sum(F.when(F.col("event_type").isNull(), 1).otherwise(0)).alias("null_event_type"),
+                F.sum(
+                    F.when(
+                        (F.col("event_type") == "purchase")
+                        & (F.col("price").isNull() | (F.col("price") < F.lit(0.0))),
+                        1,
+                    ).otherwise(0)
+                ).alias("bad_purchase_price"),
+            )
+            .collect()[0]
+        )
+    publish_count = int(publish_row["publish_count"])
+    invalid_event_type = int(publish_row["invalid_event_type"])
+    null_event_time = int(publish_row["null_event_time"])
+    null_event_date = int(publish_row["null_event_date"])
+    null_event_type = int(publish_row["null_event_type"])
+    bad_purchase_price = int(publish_row["bad_purchase_price"])
     duplicate_rows = max(valid_pre_dedupe - publish_count, 0)
-
-    invalid_timestamp_df = silver_base_rows.where(
-        F.col("_raw_event_time").isNotNull() & F.col("event_time").isNull()
-    )
-    invalid_event_type_df = silver_publish_rows.where(~F.col("event_type").isin(*sorted(ALLOWED_EVENT_TYPES)))
-    null_event_time_df = silver_publish_rows.where(F.col("event_time").isNull())
-    null_event_date_df = silver_publish_rows.where(F.col("event_date").isNull())
-    null_event_type_df = silver_publish_rows.where(F.col("event_type").isNull())
-    bad_purchase_price_df = silver_publish_rows.where(
-        (F.col("event_type") == "purchase")
-        & ((F.col("price").isNull()) | (F.col("price") < F.lit(0.0)))
-    )
-
-    invalid_timestamp = invalid_timestamp_df.count()
-    invalid_event_type = invalid_event_type_df.count()
-    null_event_time = null_event_time_df.count()
-    null_event_date = null_event_date_df.count()
-    null_event_type = null_event_type_df.count()
-    bad_purchase_price = bad_purchase_price_df.count()
 
     metrics = {
         f"{stage}_rows_seen": base_count,
@@ -157,18 +177,28 @@ def summarize_silver_dataframe_quality(
 
     bad_record_samples: dict[str, list[dict[str, Any]]] = {}
     if invalid_timestamp:
+        invalid_timestamp_df = silver_base_rows.where(
+            F.col("_raw_event_time").isNotNull() & F.col("event_time").isNull()
+        )
         bad_record_samples["invalid_timestamp"] = _sample_rows(
             invalid_timestamp_df,
             ("source_file", "source_month", "_raw_event_time", "event_type", "user_id"),
             limit=sample_limit,
         )
     if invalid_event_type:
+        invalid_event_type_df = silver_publish_rows.where(
+            F.col("event_type").isNotNull() & (~F.col("event_type").isin(*sorted(ALLOWED_EVENT_TYPES)))
+        )
         bad_record_samples["invalid_event_type"] = _sample_rows(
             invalid_event_type_df,
             ("source_file", "source_month", "event_time", "event_type", "user_id"),
             limit=sample_limit,
         )
     if bad_purchase_price:
+        bad_purchase_price_df = silver_publish_rows.where(
+            (F.col("event_type") == "purchase")
+            & ((F.col("price").isNull()) | (F.col("price") < F.lit(0.0)))
+        )
         bad_record_samples["bad_purchase_price"] = _sample_rows(
             bad_purchase_price_df,
             ("source_file", "source_month", "event_time", "event_type", "price", "user_id"),
@@ -200,19 +230,29 @@ def summarize_gold_dataframe_quality(
     """Return structured Gold DQ metrics and sampled bad rows."""
 
     missing_columns = _missing_columns(df, required_columns)
-    null_event_date_df = df.where(F.col("event_date").isNull()) if "event_date" in df.columns else df.limit(0)
+    selected_columns = [column for column in ("event_date", *columns) if column in df.columns]
+    working_df = df.select(*selected_columns) if selected_columns else df
 
     condition = None
     for col in columns:
-        if col not in df.columns:
+        if col not in working_df.columns:
             continue
         part = F.col(col).isNotNull() & (F.col(col) < F.lit(0))
         condition = part if condition is None else (condition | part)
-    negative_df = df.where(condition) if condition is not None else df.limit(0)
-
-    row_count = df.count()
-    null_event_date = null_event_date_df.count() if "event_date" in df.columns else 0
-    negative_rows = negative_df.count()
+    with bm.timed_action(working_df.sparkSession, f"{stage}_{name}_dq_counts", phase="dq"):
+        agg_exprs = [F.count(F.lit(1)).alias("row_count")]
+        if "event_date" in working_df.columns:
+            agg_exprs.append(F.sum(F.when(F.col("event_date").isNull(), 1).otherwise(0)).alias("null_event_date"))
+        else:
+            agg_exprs.append(F.lit(0).alias("null_event_date"))
+        if condition is not None:
+            agg_exprs.append(F.sum(F.when(condition, 1).otherwise(0)).alias("negative_rows"))
+        else:
+            agg_exprs.append(F.lit(0).alias("negative_rows"))
+        agg_row = working_df.agg(*agg_exprs).collect()[0]
+    row_count = int(agg_row["row_count"])
+    null_event_date = int(agg_row["null_event_date"])
+    negative_rows = int(agg_row["negative_rows"])
 
     metrics = {
         f"{stage}_{name}_rows_to_publish": row_count,
@@ -240,7 +280,8 @@ def summarize_gold_dataframe_quality(
 
     bad_record_samples: dict[str, list[dict[str, Any]]] = {}
     if negative_rows:
-        sample_cols = tuple(column for column in ("event_date", *columns) if column in df.columns)
+        negative_df = working_df.where(condition) if condition is not None else working_df.limit(0)
+        sample_cols = tuple(column for column in ("event_date", *columns) if column in working_df.columns)
         bad_record_samples["negative_metrics"] = _sample_rows(negative_df, sample_cols, limit=sample_limit)
 
     dq_passed = _evaluate_rules(rules)

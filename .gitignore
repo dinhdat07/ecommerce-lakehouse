@@ -6,6 +6,12 @@ __pycache__/
 .venv/
 venv/
 
+# Chatbot
+chatbot/backend/data/
+chatbot/frontend/node_modules/
+chatbot/frontend/dist/
+*.tsbuildinfo
+
 # Environment
 .env
 
@@ -33,3 +39,8 @@ Thumbs.db
 
 
 AGENTS.md
+
+# Server/local environment files with secrets
+infra/server/env/*.env
+*.env
+.env

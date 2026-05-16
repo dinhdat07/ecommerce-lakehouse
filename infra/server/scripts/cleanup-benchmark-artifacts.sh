@@ -9,14 +9,20 @@ DRY_RUN=true
 OLDER_THAN_DAYS="${BENCHMARK_CLEANUP_OLDER_THAN_DAYS:-7}"
 INCLUDE_S3=false
 PROFILE="${BENCHMARK_PROFILE:-profile_2month_batch_streaming_sample}"
+RUN_LABEL="${BENCHMARK_RUN_LABEL:-}"
+STAGING_SUFFIX="${BENCHMARK_CLEANUP_STAGING_SUFFIX:-}"
 EXPIRE_INPUT_SAMPLES=false
+INCLUDE_BENCHMARK_ICEBERG=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --execute) DRY_RUN=false ;;
     --dry-run) DRY_RUN=true ;;
     --include-s3) INCLUDE_S3=true ;;
     --profile) PROFILE="$2"; shift ;;
+    --run-label) RUN_LABEL="$2"; shift ;;
+    --staging-suffix) STAGING_SUFFIX="$2"; shift ;;
     --expire-input-samples) EXPIRE_INPUT_SAMPLES=true ;;
+    --include-benchmark-iceberg) INCLUDE_BENCHMARK_ICEBERG=true ;;
     --older-than-days) OLDER_THAN_DAYS="$2"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -28,9 +34,17 @@ BENCHMARK_ENV_FILE="${BENCHMARK_ENV_FILE:-${SERVER_ENV_DIR}/benchmark.env}"
 load_server_env "${STORAGE_ENV_FILE}" "${BENCHMARK_ENV_FILE}"
 
 log "Benchmark cleanup mode: $([[ "${DRY_RUN}" == true ]] && echo dry-run || echo execute), profile=${PROFILE}"
-log "Will only target benchmark/temp artifacts; raw data, production Iceberg tables, checkpoints, and Postgres are excluded."
+log "Will only target benchmark/temp artifacts; raw data and production Iceberg tables are excluded."
 log "Preserved raw files: /srv/ecommerce/raw/2019-Oct.csv.gz /srv/ecommerce/raw/2019-Nov.csv.gz /srv/ecommerce/raw/2019-Dec.csv.gz"
-log "Preserved S3 prefixes: s3a://warehouse/demo, s3a://warehouse/benchmarks/input_samples unless --expire-input-samples is passed."
+log "Preserved S3 prefixes: s3a://warehouse/benchmarks/input_samples unless --expire-input-samples is passed."
+if [[ -n "${RUN_LABEL}" ]]; then
+  log "Run-scoped S3 cleanup enabled for run_label=${RUN_LABEL}."
+  if [[ -n "${STAGING_SUFFIX}" ]]; then
+    log "Staging cleanup is limited to suffix=${STAGING_SUFFIX}."
+  fi
+else
+  log "No --run-label passed; S3 benchmark cleanup targets all benchmark staging/parquet/tmp prefixes."
+fi
 log "Disk usage before cleanup:"
 df -h / /srv/ecommerce /srv/ecommerce/spark-tmp /tmp "${BENCHMARK_OUTPUT_ROOT:-/srv/ecommerce/benchmarks}" 2>/dev/null || true
 du -xsh /srv/ecommerce /srv/ecommerce/spark-tmp /tmp "${BENCHMARK_OUTPUT_ROOT:-/srv/ecommerce/benchmarks}" 2>/dev/null || true
@@ -85,27 +99,72 @@ for host in "${REMOTE_HOSTS[@]}"; do
 done
 
 if [[ "${INCLUDE_S3}" == true ]]; then
-  S3_TARGETS=(
-    "warehouse/benchmarks/staging"
-    "warehouse/benchmarks/parquet"
-    "warehouse/benchmarks/tmp"
-    "warehouse/benchmarks/checkpoints/${PROFILE}"
-  )
+  if [[ -n "${RUN_LABEL}" ]]; then
+    staging_target="warehouse/benchmarks/staging/${RUN_LABEL}"
+    if [[ -n "${STAGING_SUFFIX}" ]]; then
+      staging_target="${staging_target}/${STAGING_SUFFIX}"
+    fi
+    S3_TARGETS=(
+      "${staging_target}"
+      "warehouse/benchmarks/parquet/${RUN_LABEL}"
+      "warehouse/benchmarks/tmp/${RUN_LABEL}"
+      "warehouse/benchmarks/checkpoints/${PROFILE}/${RUN_LABEL}"
+    )
+  else
+    S3_TARGETS=(
+      "warehouse/benchmarks/staging"
+      "warehouse/benchmarks/parquet"
+      "warehouse/benchmarks/tmp"
+      "warehouse/benchmarks/checkpoints/${PROFILE}"
+    )
+  fi
   if [[ "${EXPIRE_INPUT_SAMPLES}" == true ]]; then
     S3_TARGETS+=("warehouse/benchmarks/input_samples/${PROFILE}")
   fi
+  if [[ "${INCLUDE_BENCHMARK_ICEBERG}" == true ]]; then
+    S3_TARGETS+=(
+      "warehouse/demo/bench_bronze_events"
+      "warehouse/demo/bench_silver_events"
+      "warehouse/demo/bench_daily_revenue"
+      "warehouse/demo/bench_top_products"
+      "warehouse/demo/bench_conversion_funnel_daily"
+      "warehouse/demo/bench_category_performance_daily"
+      "warehouse/demo/bench_session_funnel"
+      "warehouse/demo/bench_user_conversion_path"
+      "warehouse/demo/bench_cohort_retention"
+      "warehouse/demo/bench_repeat_purchase"
+      "warehouse/demo/bench_product_affinity"
+      "warehouse/demo/bench_time_to_conversion_distribution"
+      "warehouse/demo/bench_rfm_segmentation"
+    )
+  fi
   log "S3/MinIO benchmark cleanup targets only:"
   printf ' - s3a://%s\n' "${S3_TARGETS[@]}"
-  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx minio && docker exec minio mc --version >/dev/null 2>&1; then
-    docker exec minio mc alias set ecommerce "http://localhost:9000" "${S3_ACCESS_KEY:-minioadmin}" "${S3_SECRET_KEY:-minioadmin}" >/dev/null
+  MINIO_CONTAINER=""
+  for candidate in server-minio minio; do
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${candidate}" && docker exec "${candidate}" mc --version >/dev/null 2>&1; then
+      MINIO_CONTAINER="${candidate}"
+      break
+    fi
+  done
+  if [[ -n "${MINIO_CONTAINER}" ]]; then
+    docker exec "${MINIO_CONTAINER}" mc alias set ecommerce "${S3_ENDPOINT:-http://100.123.190.84:9100}" "${S3_ACCESS_KEY:-minioadmin}" "${S3_SECRET_KEY:-minioadmin}" >/dev/null
     for target in "${S3_TARGETS[@]}"; do
-      docker exec minio mc du "ecommerce/${target}" 2>/dev/null || true
+      docker exec "${MINIO_CONTAINER}" mc du "ecommerce/${target}" 2>/dev/null || true
       if [[ "${DRY_RUN}" == true ]]; then
-        printf '[dry-run] docker exec minio mc rm --recursive --force %q\n' "ecommerce/${target}"
+        printf '[dry-run] docker exec %q mc rm --recursive --force %q\n' "${MINIO_CONTAINER}" "ecommerce/${target}"
       else
-        docker exec minio mc rm --recursive --force "ecommerce/${target}" 2>/dev/null || true
+        docker exec "${MINIO_CONTAINER}" mc rm --recursive --force "ecommerce/${target}" 2>/dev/null || true
       fi
     done
+    if [[ "${INCLUDE_BENCHMARK_ICEBERG}" == true ]]; then
+      log "Target: JDBC Iceberg catalog rows for demo.bench_* only"
+      if [[ "${DRY_RUN}" == true ]]; then
+        printf '[dry-run] docker exec server-postgres psql -U iceberg -d iceberg -c %q\n' "delete from iceberg_tables where catalog_name='lakehouse' and table_namespace='demo' and table_name like 'bench_%';"
+      elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx server-postgres; then
+        docker exec server-postgres psql -U iceberg -d iceberg -c "delete from iceberg_tables where catalog_name='lakehouse' and table_namespace='demo' and table_name like 'bench_%';" || true
+      fi
+    fi
   elif command -v hadoop >/dev/null 2>&1; then
     for target in "${S3_TARGETS[@]}"; do
       hadoop fs -du -h "s3a://${target}" 2>/dev/null || true

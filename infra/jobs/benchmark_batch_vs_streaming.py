@@ -33,6 +33,7 @@ if str(JOBS_DIR) not in sys.path:
 
 import batch_backfill_to_iceberg as bb  # noqa: E402
 import benchmark_input_samples as bis  # noqa: E402
+from common import benchmark_metrics as bm  # noqa: E402
 
 
 BENCHMARK_WRITE_PARTITIONS = int(os.getenv("BENCHMARK_WRITE_PARTITIONS", "4"))
@@ -45,10 +46,11 @@ SAFE_BENCHMARK_DELETE_PREFIXES = (
 
 
 def _materialize_dataframe(dataframe):
-    """Optionally pin benchmark dataframes; disabled by default to avoid local disk pressure; when enabled, prefer memory before spilling."""
+    """Optionally pin benchmark dataframes; use disk-first storage on small executors unless overridden."""
 
     if os.getenv("BENCHMARK_CACHE_DATAFRAMES", "false").lower() in {"1", "true", "yes"}:
-        return dataframe.persist(StorageLevel.MEMORY_AND_DISK)
+        level_name = os.getenv("BENCHMARK_CACHE_STORAGE_LEVEL", "DISK_ONLY").upper()
+        return dataframe.persist(getattr(StorageLevel, level_name, StorageLevel.DISK_ONLY))
     return dataframe
 
 
@@ -389,28 +391,32 @@ def _run_streaming_path(spark, bronze_batch, *, microbatch_size: int, gold_refre
     microbatches = 0
 
     started = time.perf_counter()
-    for lower in range(1, total_rows + 1, microbatch_size):
-        upper = lower + microbatch_size
-        microbatch_df = numbered.where(
-            (F.col("_bench_row_num") >= F.lit(lower)) & (F.col("_bench_row_num") < F.lit(upper))
-        ).drop("_bench_row_num")
-        microbatch_started = time.perf_counter()
-        result = bb.process_bronze_batch(
-            spark,
-            microbatch_df,
-            append_bronze=True,
-            bronze_partitions=BENCHMARK_WRITE_PARTITIONS,
-            silver_partitions=BENCHMARK_WRITE_PARTITIONS,
-            gold_refresh_mode=gold_refresh_mode,
-            run_id=f"benchmark-stream-model-{microbatches:06d}",
-        )
-        latency = round(time.perf_counter() - microbatch_started, 3)
-        batch_latencies.append(latency)
-        batch_freshness.append(latency)
-        affected_dates.update(result["affected_dates"])
-        silver_rows_written += int(result["silver_metrics"]["rows_written"])
-        gold_rows_written += int(result["gold_metrics"]["rows_written"])
-        microbatches += 1
+    try:
+        for lower in range(1, total_rows + 1, microbatch_size):
+            upper = lower + microbatch_size
+            microbatch_df = numbered.where(
+                (F.col("_bench_row_num") >= F.lit(lower)) & (F.col("_bench_row_num") < F.lit(upper))
+            ).drop("_bench_row_num")
+            microbatch_started = time.perf_counter()
+            result = bb.process_bronze_batch(
+                spark,
+                microbatch_df,
+                append_bronze=True,
+                bronze_partitions=BENCHMARK_WRITE_PARTITIONS,
+                silver_partitions=BENCHMARK_WRITE_PARTITIONS,
+                gold_refresh_mode=gold_refresh_mode,
+                run_id=f"benchmark-stream-model-{microbatches:06d}",
+            )
+            latency = round(time.perf_counter() - microbatch_started, 3)
+            batch_latencies.append(latency)
+            batch_freshness.append(latency)
+            affected_dates.update(result["affected_dates"])
+            silver_rows_written += int(result["silver_metrics"]["rows_written"])
+            gold_rows_written += int(result["gold_metrics"]["rows_written"])
+            microbatches += 1
+    finally:
+        if os.getenv("BENCHMARK_CACHE_DATAFRAMES", "false").lower() in {"1", "true", "yes"}:
+            numbered.unpersist(blocking=False)
 
     wall_seconds = round(time.perf_counter() - started, 3)
     return {
@@ -472,6 +478,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    action_metrics_jsonl = str(Path(args.output_json).with_name("action_metrics.jsonl")) if args.output_json else ""
+    action_metrics_csv = str(Path(args.output_json).with_name("action_metrics.csv")) if args.output_json else ""
+    bm.configure(
+        run_id=args.run_id or Path(args.output_json or "").parent.name or "ad-hoc",
+        profile=args.profile,
+        jsonl_path=action_metrics_jsonl,
+        csv_path=action_metrics_csv,
+    )
     spark = bb.build_spark_session()
     bb.log_spark_runtime_config(spark, output_path=args.output_json or "")
     disk_before = _disk_usage_snapshot()
@@ -542,6 +556,7 @@ def main() -> None:
         },
     }
     _write_results(results, output_json=args.output_json, output_csv=args.output_csv)
+    bm.flush_csv(action_metrics_csv)
     print(json.dumps(results, indent=2))
     spark.stop()
 

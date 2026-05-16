@@ -29,6 +29,7 @@ if str(JOBS_DIR) not in sys.path:
 
 import batch_backfill_to_iceberg as bb  # noqa: E402
 import benchmark_input_samples as bis  # noqa: E402
+from common import benchmark_metrics as bm  # noqa: E402
 from common.constants import ICEBERG_WAREHOUSE  # noqa: E402
 from dq_iceberg import summarize_gold_dataframe_quality, summarize_silver_dataframe_quality  # noqa: E402
 
@@ -94,7 +95,56 @@ def _bench_table_names() -> list[str]:
 
 def _drop_bench_tables(spark) -> None:
     for table_name in reversed(_bench_table_names()):
-        spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        try:
+            spark.sql(f"DROP TABLE IF EXISTS {table_name}")
+        except Exception as exc:
+            message = str(exc)
+            stale_metadata = (
+                "Location does not exist" in message
+                or "NoSuchKeyException" in message
+                or "The specified key does not exist" in message
+            )
+            if not stale_metadata:
+                raise
+            _delete_stale_jdbc_catalog_entry(spark, table_name, message)
+
+
+def _delete_stale_jdbc_catalog_entry(spark, table_name: str, error_message: str) -> None:
+    """Remove a JDBC Iceberg catalog row whose metadata file was already deleted."""
+
+    parts = table_name.split(".")
+    if len(parts) < 3:
+        raise RuntimeError(f"cannot purge stale Iceberg table reference for malformed name {table_name}") from None
+    catalog_name = parts[0]
+    namespace = ".".join(parts[1:-1])
+    short_table_name = parts[-1]
+    uri = spark.conf.get(f"spark.sql.catalog.{catalog_name}.uri", "")
+    user = spark.conf.get(f"spark.sql.catalog.{catalog_name}.jdbc.user", "")
+    password = spark.conf.get(f"spark.sql.catalog.{catalog_name}.jdbc.password", "")
+    if not uri:
+        raise RuntimeError(f"cannot purge stale Iceberg table reference for {table_name}: missing JDBC uri") from None
+
+    try:
+        conn = spark._jvm.java.sql.DriverManager.getConnection(uri, user, password)
+        try:
+            stmt = conn.prepareStatement(
+                "DELETE FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?"
+            )
+            try:
+                stmt.setString(1, catalog_name)
+                stmt.setString(2, namespace)
+                stmt.setString(3, short_table_name)
+                deleted = stmt.executeUpdate()
+            finally:
+                stmt.close()
+        finally:
+            conn.close()
+    except Exception as purge_exc:
+        raise RuntimeError(
+            f"failed to purge stale Iceberg table reference for {table_name}; "
+            f"original error={error_message}; purge error={purge_exc}"
+        ) from purge_exc
+    print(f"Purged stale Iceberg JDBC catalog entry for {table_name} rows_deleted={deleted}", file=sys.stderr)
 
 
 def _flatten_for_csv(results: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +163,9 @@ def _flatten_for_csv(results: dict[str, Any]) -> dict[str, Any]:
         "iceberg_query_latency_seconds": results["iceberg"]["query_latency_seconds_avg"],
         "iceberg_storage_bytes": results["iceberg"]["storage_bytes"],
         "iceberg_throughput_rows_per_second": results["iceberg"]["throughput_rows_per_second"],
+        "engine_mode": results.get("engine_mode", "both"),
+        "action_metrics_jsonl": results.get("action_metrics_jsonl", ""),
+        "action_metrics_csv": results.get("action_metrics_csv", ""),
         "subset_enabled": results["subset"]["subset_enabled"],
         "subset_mode": results["subset"]["subset_mode"],
         "input_row_count": results["subset"]["input_row_count"],
@@ -178,6 +231,27 @@ def _path_size_bytes(spark, path: str) -> int:
     return _hadoop_path_size_bytes(spark, path)
 
 
+def _path_stats(spark, path: str) -> dict[str, Any]:
+    """Return bytes, file count, and average file size for local or Hadoop paths."""
+
+    if "://" not in path:
+        local = Path(path)
+        files = [candidate for candidate in local.rglob("*") if candidate.is_file()] if local.exists() else []
+        size = sum(candidate.stat().st_size for candidate in files)
+        return {"path": path, "bytes": size, "file_count": len(files), "average_file_bytes": round(size / len(files), 1) if files else 0}
+
+    jvm = spark._jvm
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    hadoop_path = jvm.org.apache.hadoop.fs.Path(path)
+    fs = hadoop_path.getFileSystem(hadoop_conf)
+    if not fs.exists(hadoop_path):
+        return {"path": path, "bytes": 0, "file_count": 0, "average_file_bytes": 0}
+    summary = fs.getContentSummary(hadoop_path)
+    file_count = int(summary.getFileCount())
+    size = int(summary.getLength())
+    return {"path": path, "bytes": size, "file_count": file_count, "average_file_bytes": round(size / file_count, 1) if file_count else 0}
+
+
 def _warehouse_table_path(table_name: str, warehouse_uri: str) -> str:
     _, schema, short_name = table_name.split(".", 2)
     warehouse_root = warehouse_uri.replace("s3://", "s3a://", 1).rstrip("/")
@@ -198,7 +272,8 @@ def _run_queries(spark, queries: dict[str, str]) -> dict[str, float]:
     latencies: dict[str, float] = {}
     for name, query in queries.items():
         started = time.perf_counter()
-        spark.sql(query).collect()
+        with bm.timed_action(spark, f"query_{name}", phase="query_scan", details={"query": query}):
+            spark.sql(query).collect()
         latencies[name] = round(time.perf_counter() - started, 3)
     return latencies
 
@@ -233,11 +308,17 @@ def _validate_parquet_warehouse(spark, warehouse: str) -> None:
 
 
 def _materialize_dataframe(dataframe):
-    """Optionally pin benchmark dataframes; disabled by default to avoid local disk pressure; when enabled, prefer memory before spilling."""
+    """Optionally pin benchmark dataframes; use disk-first storage on small executors unless overridden."""
 
     if os.getenv("BENCHMARK_CACHE_DATAFRAMES", "false").lower() in {"1", "true", "yes"}:
-        return dataframe.persist(StorageLevel.MEMORY_AND_DISK)
+        level_name = os.getenv("BENCHMARK_CACHE_STORAGE_LEVEL", "DISK_ONLY").upper()
+        return dataframe.persist(getattr(StorageLevel, level_name, StorageLevel.DISK_ONLY))
     return dataframe
+
+
+def _release_dataframe(dataframe) -> None:
+    if dataframe is not None and os.getenv("BENCHMARK_CACHE_DATAFRAMES", "false").lower() in {"1", "true", "yes"}:
+        dataframe.unpersist(blocking=False)
 
 
 def _stage_benchmark_input(spark, dataframe, args: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
@@ -389,19 +470,26 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: str) -> dict[str, Any]
     gold_root = _path_join(warehouse, "gold")
 
     ingest_started = time.perf_counter()
-    bronze_rows = bronze_batch.count()
-    _partitioned_output(bronze_batch, "source_month").write.mode("overwrite").partitionBy("source_month").format(
-        "parquet"
-    ).save(bronze_path)
+    bronze_rows = bm.timed_count(bronze_batch, "parquet_bronze_count", phase="parquet_ingest")
+    with bm.timed_action(spark, "parquet_bronze_write", phase="parquet_ingest", details={"path": bronze_path}):
+        _partitioned_output(bronze_batch, "source_month").write.mode("overwrite").partitionBy("source_month").format(
+            "parquet"
+        ).save(bronze_path)
     ingestion_seconds = round(time.perf_counter() - ingest_started, 3)
 
     transform_started = time.perf_counter()
-    silver_base_rows = bb.build_silver_base_rows(bronze_batch)
-    silver_candidates = _materialize_dataframe(bb.deduplicate_silver_candidates(silver_base_rows))
+    silver_base_rows = _materialize_dataframe(bb.build_silver_base_rows(bronze_batch))
+    with bm.timed_action(spark, "parquet_silver_deduplicate", phase="parquet_transform"):
+        silver_candidates = _materialize_dataframe(bb.deduplicate_silver_candidates(silver_base_rows))
     silver_dq = summarize_silver_dataframe_quality(silver_base_rows, silver_candidates, stage="silver_parquet")
-    _partitioned_output(silver_candidates, "event_date").write.mode("overwrite").partitionBy("event_date").format(
-        "parquet"
-    ).save(silver_path)
+    with bm.timed_action(spark, "parquet_silver_write", phase="parquet_transform", details={"path": silver_path}):
+        _partitioned_output(silver_candidates, "event_date").write.mode("overwrite").partitionBy("event_date").format(
+            "parquet"
+        ).save(silver_path)
+    silver_rows = bm.timed_count(silver_candidates, "parquet_silver_final_count", phase="parquet_transform")
+    _release_dataframe(silver_base_rows)
+    _release_dataframe(silver_candidates)
+    _release_dataframe(bronze_batch)
 
     silver_slice = _materialize_dataframe(spark.read.parquet(silver_path))
     sessionized = _materialize_dataframe(bb.build_sessionized_events(silver_slice))
@@ -453,41 +541,58 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: str) -> dict[str, Any]
     }
     gold_dq: dict[str, dict[str, Any]] = {}
     gold_row_counts: dict[str, int] = {}
+    query_table_names = {"daily_revenue", "top_products", "conversion_funnel_daily", "repeat_purchase", "rfm_segmentation"}
+    query_tables: dict[str, Any] = {}
     for name, dataframe in gold_tables.items():
-        row_count = dataframe.count()
-        short_name, cols, required_cols = gold_specs[name]
-        gold_dq[short_name] = summarize_gold_dataframe_quality(
-            dataframe,
-            name=short_name,
-            columns=cols,
-            required_columns=required_cols,
-            stage="gold_parquet",
-        )
-        out = _path_join(gold_root, name)
-        if row_count > 0:
-            if "event_date" in dataframe.columns:
-                dataframe = _partitioned_output(dataframe, "event_date")
-                dataframe.write.mode("overwrite").partitionBy("event_date").format("parquet").save(out)
-            else:
-                dataframe.coalesce(2).write.mode("overwrite").format("parquet").save(out)
-        gold_row_counts[name] = row_count
+        cached_dataframe = _materialize_dataframe(dataframe)
+        try:
+            row_count = bm.timed_count(cached_dataframe, f"parquet_gold_{name}_count", phase="parquet_gold")
+            short_name, cols, required_cols = gold_specs[name]
+            gold_dq[short_name] = summarize_gold_dataframe_quality(
+                cached_dataframe,
+                name=short_name,
+                columns=cols,
+                required_columns=required_cols,
+                stage="gold_parquet",
+            )
+            out = _path_join(gold_root, name)
+            if row_count > 0:
+                if "event_date" in cached_dataframe.columns:
+                    write_dataframe = _partitioned_output(cached_dataframe, "event_date")
+                    with bm.timed_action(spark, f"parquet_gold_{name}_write", phase="parquet_gold", details={"path": out}):
+                        write_dataframe.write.mode("overwrite").partitionBy("event_date").format("parquet").save(out)
+                else:
+                    with bm.timed_action(spark, f"parquet_gold_{name}_write", phase="parquet_gold", details={"path": out}):
+                        cached_dataframe.coalesce(2).write.mode("overwrite").format("parquet").save(out)
+            gold_row_counts[name] = row_count
+            if name in query_table_names:
+                query_tables[name] = cached_dataframe
+        finally:
+            if name not in query_table_names:
+                _release_dataframe(cached_dataframe)
     transformation_seconds = round(time.perf_counter() - transform_started, 3)
 
-    gold_tables["daily_revenue"].createOrReplaceTempView("bench_parquet_daily_revenue")
-    gold_tables["top_products"].createOrReplaceTempView("bench_parquet_top_products")
-    gold_tables["conversion_funnel_daily"].createOrReplaceTempView("bench_parquet_conversion_funnel_daily")
-    gold_tables["repeat_purchase"].createOrReplaceTempView("bench_parquet_repeat_purchase")
-    gold_tables["rfm_segmentation"].createOrReplaceTempView("bench_parquet_rfm_segmentation")
-    query_latencies = _run_queries(
-        spark,
-        {
-            "daily_revenue_sum": "SELECT round(sum(purchase_revenue), 2) AS revenue FROM bench_parquet_daily_revenue",
-            "top_products_avg": "SELECT round(avg(purchase_revenue), 2) AS avg_revenue FROM bench_parquet_top_products",
-            "funnel_totals": "SELECT sum(views) AS views, sum(purchases) AS purchases FROM bench_parquet_conversion_funnel_daily",
-            "repeat_purchase_avg": "SELECT round(avg(repeat_purchase_rate), 4) AS rate FROM bench_parquet_repeat_purchase",
-            "rfm_users": "SELECT count(*) AS users FROM bench_parquet_rfm_segmentation",
-        },
-    )
+    try:
+        query_tables.get("daily_revenue", gold_tables["daily_revenue"]).createOrReplaceTempView("bench_parquet_daily_revenue")
+        query_tables.get("top_products", gold_tables["top_products"]).createOrReplaceTempView("bench_parquet_top_products")
+        query_tables.get("conversion_funnel_daily", gold_tables["conversion_funnel_daily"]).createOrReplaceTempView("bench_parquet_conversion_funnel_daily")
+        query_tables.get("repeat_purchase", gold_tables["repeat_purchase"]).createOrReplaceTempView("bench_parquet_repeat_purchase")
+        query_tables.get("rfm_segmentation", gold_tables["rfm_segmentation"]).createOrReplaceTempView("bench_parquet_rfm_segmentation")
+        query_latencies = _run_queries(
+            spark,
+            {
+                "daily_revenue_sum": "SELECT round(sum(purchase_revenue), 2) AS revenue FROM bench_parquet_daily_revenue",
+                "top_products_avg": "SELECT round(avg(purchase_revenue), 2) AS avg_revenue FROM bench_parquet_top_products",
+                "funnel_totals": "SELECT sum(views) AS views, sum(purchases) AS purchases FROM bench_parquet_conversion_funnel_daily",
+                "repeat_purchase_avg": "SELECT round(avg(repeat_purchase_rate), 4) AS rate FROM bench_parquet_repeat_purchase",
+                "rfm_users": "SELECT count(*) AS users FROM bench_parquet_rfm_segmentation",
+            },
+        )
+    finally:
+        for dataframe in query_tables.values():
+            _release_dataframe(dataframe)
+        _release_dataframe(silver_slice)
+        _release_dataframe(sessionized)
 
     total_runtime_seconds = round(ingestion_seconds + transformation_seconds + sum(query_latencies.values()), 3)
     return {
@@ -499,13 +604,12 @@ def _run_parquet_baseline(spark, bronze_batch, warehouse: str) -> dict[str, Any]
         "query_latency_seconds_avg": round(sum(query_latencies.values()) / len(query_latencies), 3),
         "storage_bytes": _path_size_bytes(spark, warehouse),
         "bronze_rows": bronze_rows,
-        "silver_rows": silver_candidates.count(),
+        "silver_rows": silver_rows,
         "gold_row_counts": gold_row_counts,
         "silver_dq_passed": silver_dq["dq_passed"],
         "gold_dq_passed": all(summary["dq_passed"] for summary in gold_dq.values()),
         "storage_footprint": {
-            "root_path": warehouse,
-            "bytes": _path_size_bytes(spark, warehouse),
+            **_path_stats(spark, warehouse),
         },
     }
 
@@ -519,17 +623,20 @@ def _run_iceberg_lakehouse(
     drop_existing_tables: bool = True,
 ) -> dict[str, Any]:
     if drop_existing_tables:
-        _drop_bench_tables(spark)
-    bb.create_tables_if_needed(spark)
-    result = bb.process_bronze_batch(
-        spark,
-        bronze_batch,
-        append_bronze=True,
-        bronze_partitions=BENCHMARK_WRITE_PARTITIONS,
-        silver_partitions=BENCHMARK_WRITE_PARTITIONS,
-        gold_refresh_mode=gold_refresh_mode,
-        run_id="benchmark-iceberg",
-    )
+        with bm.timed_action(spark, "iceberg_drop_benchmark_tables", phase="iceberg_setup"):
+            _drop_bench_tables(spark)
+    with bm.timed_action(spark, "iceberg_create_tables", phase="iceberg_setup"):
+        bb.create_tables_if_needed(spark)
+    with bm.timed_action(spark, "iceberg_process_bronze_batch", phase="iceberg_pipeline"):
+        result = bb.process_bronze_batch(
+            spark,
+            bronze_batch,
+            append_bronze=True,
+            bronze_partitions=BENCHMARK_WRITE_PARTITIONS,
+            silver_partitions=BENCHMARK_WRITE_PARTITIONS,
+            gold_refresh_mode=gold_refresh_mode,
+            run_id="benchmark-iceberg",
+        )
     query_latencies = _run_queries(
         spark,
         {
@@ -540,10 +647,11 @@ def _run_iceberg_lakehouse(
             "rfm_users": f"SELECT count(*) AS users FROM {bb.GOLD_RFM_SEGMENTATION}",
         },
     )
-    storage_bytes = sum(
-        _hadoop_path_size_bytes(spark, _warehouse_table_path(table_name, warehouse_uri))
-        for table_name in _bench_table_names()
-    )
+    table_storage = {
+        table_name: _path_stats(spark, _warehouse_table_path(table_name, warehouse_uri)) for table_name in _bench_table_names()
+    }
+    storage_bytes = sum(item["bytes"] for item in table_storage.values())
+    file_count = sum(item["file_count"] for item in table_storage.values())
     ingestion_seconds = float(result["bronze_metrics"]["duration_seconds"])
     transformation_seconds = round(
         float(result["silver_metrics"]["duration_seconds"]) + float(result["gold_metrics"]["duration_seconds"]),
@@ -559,6 +667,13 @@ def _run_iceberg_lakehouse(
         "query_latency_seconds": query_latencies,
         "query_latency_seconds_avg": round(sum(query_latencies.values()) / len(query_latencies), 3),
         "storage_bytes": storage_bytes,
+        "storage_footprint": {
+            "root_path": warehouse_uri,
+            "bytes": storage_bytes,
+            "file_count": file_count,
+            "average_file_bytes": round(storage_bytes / file_count, 1) if file_count else 0,
+            "tables": table_storage,
+        },
         "bronze_rows": bronze_rows,
         "silver_rows": result["silver_metrics"]["rows_written"],
         "gold_row_counts": result["gold_row_counts"],
@@ -571,6 +686,26 @@ def _run_iceberg_lakehouse(
 
 
 def _skipped_parquet_baseline(reason: str) -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "skipped": True,
+        "skip_reason": reason,
+        "ingestion_seconds": 0.0,
+        "transformation_seconds": 0.0,
+        "total_runtime_seconds": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "query_latency_seconds": {},
+        "query_latency_seconds_avg": 0.0,
+        "storage_bytes": 0,
+        "bronze_rows": 0,
+        "silver_rows": 0,
+        "gold_row_counts": {},
+        "silver_dq_passed": None,
+        "gold_dq_passed": None,
+    }
+
+
+def _skipped_iceberg_lakehouse(reason: str) -> dict[str, Any]:
     return {
         "enabled": False,
         "skipped": True,
@@ -627,6 +762,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-seed", type=int, default=42, help="Random seed used when --subset-mode=fraction.")
     parser.add_argument("--staging-enabled", default="false", help="Stage the selected benchmark input once before timed phases.")
     parser.add_argument("--staging-path", default="", help="S3A/local path for benchmark-only staged input.")
+    parser.add_argument(
+        "--engine-mode",
+        choices=["both", "parquet", "iceberg", "input_only"],
+        default=os.getenv("BENCHMARK_ENGINE_MODE", "both"),
+        help="Run both engines, one engine, or only input resolution/staging.",
+    )
     parser.add_argument("--gold-refresh-mode", choices=sorted(bb.GOLD_REFRESH_MODES), default=os.getenv("SYSTEM_GOLD_REFRESH_MODE", "full"))
     parser.add_argument(
         "--iceberg-drop-existing-tables",
@@ -637,12 +778,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=os.getenv("BENCHMARK_RUN_ID", ""), help="Benchmark run id.")
     parser.add_argument("--output-json", help="Optional JSON output path.")
     parser.add_argument("--output-csv", help="Optional CSV output path.")
+    parser.add_argument("--action-metrics-jsonl", default=os.getenv("BENCHMARK_ACTION_METRICS_JSONL", ""))
+    parser.add_argument("--action-metrics-csv", default=os.getenv("BENCHMARK_ACTION_METRICS_CSV", ""))
     bis.add_input_sample_args(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    run_id = args.run_id or Path(args.output_json or "").parent.name or "ad-hoc"
+    action_metrics_jsonl = args.action_metrics_jsonl
+    action_metrics_csv = args.action_metrics_csv
+    if not action_metrics_jsonl and args.output_json:
+        action_metrics_jsonl = str(Path(args.output_json).with_name("action_metrics.jsonl"))
+    if not action_metrics_csv and args.output_json:
+        action_metrics_csv = str(Path(args.output_json).with_name("action_metrics.csv"))
+    bm.configure(
+        run_id=run_id,
+        profile=args.profile,
+        jsonl_path=action_metrics_jsonl,
+        csv_path=action_metrics_csv,
+    )
     spark = bb.build_spark_session()
     bb.log_spark_runtime_config(spark, output_path=args.output_json or args.parquet_warehouse)
     _apply_bench_table_names()
@@ -661,24 +817,33 @@ def main() -> None:
     bronze_row_count = int(input_result["benchmark_row_count"])
     subset_enabled = _parse_bool(args.subset_enabled)
 
-    parquet_enabled = _parse_bool(args.parquet_baseline_enabled)
+    parquet_enabled = _parse_bool(args.parquet_baseline_enabled) and args.engine_mode in {"both", "parquet"}
     if parquet_enabled:
         parquet_results = _run_parquet_baseline(spark, bronze_batch, args.parquet_warehouse)
     else:
-        parquet_results = _skipped_parquet_baseline("disabled_by_profile_or_env")
-    iceberg_results = _run_iceberg_lakehouse(
-        spark,
-        bronze_batch,
-        warehouse_uri=args.warehouse_uri,
-        gold_refresh_mode=args.gold_refresh_mode,
-        drop_existing_tables=_parse_bool(args.iceberg_drop_existing_tables),
-    )
+        parquet_results = _skipped_parquet_baseline("disabled_by_profile_or_engine_mode")
+    if args.engine_mode in {"both", "iceberg"}:
+        iceberg_results = _run_iceberg_lakehouse(
+            spark,
+            bronze_batch,
+            warehouse_uri=args.warehouse_uri,
+            gold_refresh_mode=args.gold_refresh_mode,
+            drop_existing_tables=_parse_bool(args.iceberg_drop_existing_tables),
+        )
+    else:
+        iceberg_results = _skipped_iceberg_lakehouse("disabled_by_engine_mode")
+
+    bm.flush_csv(action_metrics_csv)
 
     results = {
-        "run_id": args.run_id or Path(args.output_json or "").parent.name or "ad-hoc",
+        "run_id": run_id,
         "git_commit": _git_commit(),
         "profile": args.profile,
         "benchmark_mode": mode,
+        "engine_mode": args.engine_mode,
+        "action_metrics_jsonl": action_metrics_jsonl,
+        "action_metrics_csv": action_metrics_csv,
+        "action_metrics": bm.metrics(),
         "dataset": {
             "label": f"{mode}:{args.start_month}..{args.end_month}" if mode == "full" else f"{mode}:{Path(input_files[0]).name}",
             "start_month": args.start_month,
