@@ -18,23 +18,39 @@ E-commerce user-behavior analytics lakehouse implementing a medallion architectu
 
 ## Architecture
 
-```
-Historical CSV ──→ Spark Batch ──→ Bronze (Iceberg) ──→ Silver (Normalized) ──→ Gold (Aggregated)
-                                                                                       │
-Kafka Events ──→ Spark Structured Streaming ──→ Bronze ──→ Silver ──→ Gold            │
-                                                                                       │
-                                                              Trino ──→ Superset       │
-                                                                                       │
-                                                              Trino ──→ AI Chatbot ────┘
-```
+### Data Pipeline
 
-### Three-Phase Pipeline
+```mermaid
+flowchart LR
+    subgraph Ingestion["Ingestion"]
+        csv["Historical CSV<br/>2019-10 → 2020-02"]
+        kafka["Kafka Events<br/>2020-03 → 2020-04"]
+    end
 
-| Phase | Scope | Ingestion | Processing |
-|-------|-------|-----------|------------|
-| Phase 1 | `2019-10` to `2020-02` historical backfill | CSV/CSV.GZ files | Spark batch into Iceberg |
-| Phase 2 | `2020-03` to `2020-04` bounded streaming | Kafka replay producer | Spark Structured Streaming |
-| Phase 3 | Production hardening | Mixed batch + streaming | DQ gates, manifests, benchmarks |
+    subgraph Processing["Spark Processing"]
+        batch["Spark Batch"]
+        streaming["Spark Structured<br/>Streaming"]
+    end
+
+    subgraph Medallion["Medallion Layers"]
+        bronze["Bronze<br/>Raw events<br/>+ record_hash<br/>+ dedupe_key"]
+        silver["Silver<br/>Normalized &<br/>deduplicated"]
+        gold["Gold<br/>11 aggregation<br/>tables"]
+    end
+
+    subgraph Serving["Serving Layer"]
+        trino["Trino"]
+        superset["Superset<br/>Dashboards"]
+        chatbot["AI Chatbot<br/>Vertex AI Gemini"]
+    end
+
+    csv --> batch --> bronze
+    kafka --> streaming --> bronze
+    bronze --> silver --> gold
+    gold --> trino
+    trino --> superset
+    trino --> chatbot
+```
 
 ### Medallion Layers
 
@@ -44,13 +60,44 @@ Kafka Events ──→ Spark Structured Streaming ──→ Bronze ──→ Sil
 
 ### 3-Node Topology
 
-| Node | Role | Services |
-|------|------|----------|
-| `node1` | Control & Services | Kafka controller, MinIO, Postgres (Iceberg JDBC catalog), Trino coordinator, Superset, Spark master |
-| `node2` | Compute | Kafka broker, Spark worker, batch execution |
-| `node3` | Compute | Kafka broker, Spark worker, streaming execution |
+```mermaid
+flowchart TB
+    subgraph node1["Node 1 — Control & Services"]
+        direction LR
+        kc1["Kafka<br/>Controller"]
+        minio["MinIO<br/>Storage"]
+        pg["PostgreSQL<br/>Iceberg Catalog"]
+        trino1["Trino<br/>Coordinator"]
+        superset1["Superset"]
+        sm["Spark Master"]
+    end
+
+    subgraph node2["Node 2 — Compute"]
+        kb2["Kafka Broker"]
+        sw2["Spark Worker<br/>Batch Execution"]
+    end
+
+    subgraph node3["Node 3 — Compute"]
+        kb3["Kafka Broker"]
+        sw3["Spark Worker<br/>Streaming Execution"]
+    end
+
+    tailscale{{"Tailscale Mesh VPN"}}
+
+    node1 --- tailscale
+    node2 --- tailscale
+    node3 --- tailscale
+```
 
 Nodes communicate over Tailscale mesh VPN. Server deployment assets are under `infra/server/`.
+
+### Pipeline Phases
+
+| Phase | Scope | Ingestion | Processing |
+|-------|-------|-----------|------------|
+| Phase 1 | `2019-10` to `2020-02` historical backfill | CSV/CSV.GZ files | Spark batch into Iceberg |
+| Phase 2 | `2020-03` to `2020-04` bounded streaming | Kafka replay producer | Spark Structured Streaming |
+| Phase 3 | Production hardening | Mixed batch + streaming | DQ gates, manifests, benchmarks |
 
 ---
 
