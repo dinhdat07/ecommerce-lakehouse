@@ -62,7 +62,7 @@ This project uses a Spark -> Iceberg -> Trino -> Superset lakehouse with Kafka s
 |---|---|---|---|
 | Sessionization | Dataset `user_session` field from Kaggle/REES46 dataset semantics. https://www.kaggle.com/datasets/mkechinov/ecommerce-behavior-data-from-multi-category-store/data | Uses provided `user_session` as the primary session key and falls back to derived sessions only when missing. | Original dataset semantics; explain this explicitly in the report. |
 | Gold table contracts | `docs/pipeline.md` and `infra/trino/sql/validate_silver_gold.sql` | Defines project-specific analytics outputs: revenue, category performance, conversion funnel, session funnel, retention, repeat purchase, product affinity, time-to-conversion, and RFM. | Internal methodology; high quality if presented as project-defined metrics with validation SQL rather than as an external standard. |
-| Demo/operational proof | `docs/demo_showcase_runbook.md`, `docs/monitoring_runbook.md`, and server validation scripts | Shows how to prove distributed components, row counts, BI dashboards, streaming, and chatbot behavior during the demo. | Internal operational evidence; useful as an appendix, not as an external academic citation. |
+| Demo/operational proof | `docs/demo_guide.md`, `docs/operations.md`, and server validation scripts | Shows how to prove distributed components, row counts, BI dashboards, streaming, and chatbot behavior during the demo. | Internal operational evidence; useful as an appendix, not as an external academic citation. |
 
 ## Recommended bibliography for report/slides
 

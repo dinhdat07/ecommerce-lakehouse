@@ -195,7 +195,7 @@ bash infra/server/scripts/start-kafka-cluster.sh
 bash infra/server/scripts/start-streaming.sh
 ```
 
-Full step-by-step guide: [docs/deployment_3node_ubuntu.md](docs/deployment_3node_ubuntu.md)
+Full step-by-step guide: [docs/deployment.md](docs/deployment.md)
 
 ---
 
@@ -221,16 +221,14 @@ Architecture details: [docs/chatbot_architecture.md](docs/chatbot_architecture.m
 |----------|-------|
 | [architecture.md](docs/architecture.md) | Full system architecture and data flow |
 | [pipeline.md](docs/pipeline.md) | Bronze, Silver, Gold contracts and refresh models |
-| [deployment_3node_ubuntu.md](docs/deployment_3node_ubuntu.md) | Step-by-step 3-node Ubuntu deployment |
-| [docker_laptop_stack.md](docs/docker_laptop_stack.md) | Laptop Docker Compose architecture |
+| [deployment.md](docs/deployment.md) | Step-by-step 3-node Ubuntu deployment |
+| [local_docker.md](docs/local_docker.md) | Laptop Docker Compose architecture |
+| [development.md](docs/development.md) | Local development environment and test commands |
+| [operations.md](docs/operations.md) | DQ rules, manifests, metrics, recovery procedures |
+| [demo_guide.md](docs/demo_guide.md) | Demo showcase walkthrough |
 | [benchmarking.md](docs/benchmarking.md) | Benchmark modes, commands, and interpretation |
-| [benchmark_profile_2month_batch_streaming_sample.md](docs/benchmark_profile_2month_batch_streaming_sample.md) | 2-month benchmark profile report |
-| [monitoring_runbook.md](docs/monitoring_runbook.md) | DQ rules, manifests, metrics, recovery |
+| [benchmark_profile.md](docs/benchmark_profile.md) | 2-month benchmark profile report |
 | [chatbot_architecture.md](docs/chatbot_architecture.md) | Chatbot system design |
-| [system_map.md](docs/system_map.md) | File-to-responsibility mapping |
 | [file_reference.md](docs/file_reference.md) | Key classes and functions per file |
-| [gap_analysis.md](docs/gap_analysis.md) | Implementation status and remaining gaps |
-| [hardening_diagnosis.md](docs/hardening_diagnosis.md) | Production hardening diagnosis |
 | [improvements.md](docs/improvements.md) | Recommended next improvements |
-| [demo_showcase_runbook.md](docs/demo_showcase_runbook.md) | Demo showcase walkthrough |
 | [references.md](docs/references.md) | Bibliography and source-quality notes |

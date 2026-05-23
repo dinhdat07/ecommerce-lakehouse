@@ -154,17 +154,19 @@ This document summarizes the important added or modified files, their roles, and
   - Main steps: generate March-April sample data, start the required Compose profiles, recreate the Kafka topic, launch the Spark streaming job, replay the sample to Kafka, and wait for the bounded query to finish.
 - `infra/scripts/run-phase3-benchmarks.sh`
   - Role: Docker wrapper for the Phase 3 system and processing-model benchmarks.
-- `apps/sql/trino_gold_views.sql`
-  - Role: legacy serving-layer SQL view definitions retained for reference from the earlier view-based demo path.
-
 ## Documentation
 
 - `README.md`: repository overview and quick start.
-- `docs/gap_analysis.md`: current implementation status and remaining gaps.
-- `docs/local_setup.md`: local environment, sample data, and test instructions.
-- `docs/monitoring_runbook.md`: stage metrics, manifests, DQ rules, reset, and recovery guidance.
-- `docs/benchmarking.md`: benchmark modes, commands, output files, and interpretation notes.
-- `docs/docker_laptop_stack.md`: laptop-friendly compose architecture, usage, and cleanup guidance.
-- `docs/multi_node_readiness.md`: current scaling posture and migration path.
-- `docs/deployment_3node_ubuntu.md`: step-by-step 3-server deployment guide.
+- `docs/architecture.md`: visible and hidden system architecture.
+- `docs/pipeline.md`: Bronze, Silver, Gold contracts and refresh models.
+- `docs/deployment.md`: step-by-step 3-node Ubuntu deployment guide.
+- `docs/local_docker.md`: laptop-friendly compose architecture, usage, and cleanup.
+- `docs/development.md`: local dev environment, sample data, and test instructions.
+- `docs/operations.md`: stage metrics, manifests, DQ rules, reset, and recovery.
+- `docs/demo_guide.md`: demo showcase walkthrough.
+- `docs/benchmarking.md`: benchmark modes, commands, output files, and interpretation.
+- `docs/benchmark_profile.md`: 2-month benchmark profile report.
+- `docs/chatbot_architecture.md`: chatbot system design.
+- `docs/file_reference.md`: file roles and key classes/functions.
 - `docs/improvements.md`: limitations and recommended next improvements.
+- `docs/references.md`: curated bibliography and source-quality notes.

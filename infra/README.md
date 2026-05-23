@@ -41,7 +41,7 @@ Use the root stack for bounded development. Use `infra/server/` when preparing a
 
 ## Operator Guide
 
-Use [docs/docker_laptop_stack.md](/mnt/e/coding/learn%20data/data%20engineering/ecommerce-lakehouse/docs/docker_laptop_stack.md) for step-by-step instructions, disk expectations, verification steps, and cleanup guidance.
+Use [docs/local_docker.md](../docs/local_docker.md) for step-by-step instructions, disk expectations, verification steps, and cleanup guidance.
 
 ## Trino: `Cannot check and eventually update SQL schema`
 
