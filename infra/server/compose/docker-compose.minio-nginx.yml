@@ -1,0 +1,9 @@
+services:
+  minio-nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    network_mode: host
+    container_name: server-minio-nginx
+    volumes:
+      - ${SERVER_RUNTIME_DIR}/nginx/minio.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${MINIO_NGINX_CERT_DIR:-/srv/ecommerce/certs/minio}:/etc/nginx/certs:ro

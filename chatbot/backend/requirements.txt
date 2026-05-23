@@ -1,0 +1,9 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic-settings==2.9.1
+sqlglot==26.16.4
+trino==0.333.0
+google-genai==1.15.0
+itsdangerous==2.2.0
+httpx==0.28.1
+pytest==8.3.5

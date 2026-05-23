@@ -12,9 +12,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common.config import AppConfig
+from common.constants import DQ_FAIL_ON_ERROR
+from common.dq_checks import DQReport, validate_gold_tables_for_publication
 from common.manifests import RunManifest, write_manifest
+from common.pipeline_metrics import emit_pipeline_metrics
 from common.runtime import build_run_id
 from common.storage import iter_jsonl_files, read_jsonl, write_csv
+from pipelines.gold.cohort_retention import build_cohort_retention_table
+from pipelines.gold.product_affinity import build_product_affinity_table
+from pipelines.gold.repeat_purchase import build_repeat_purchase_table
+from pipelines.gold.rfm_segmentation import build_rfm_segmentation_table
+from pipelines.gold.time_to_conversion_distribution import build_time_to_conversion_distribution_table
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,7 @@ class GoldAggregationResult:
     rows_read: int
     output_paths: list[Path]
     manifest_path: Path
+    dq_report: DQReport | None = None
 
 
 def _safe_divide(numerator: float, denominator: float) -> float:
@@ -194,7 +203,7 @@ def build_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
         row["purchase_revenue"] = round(row["purchase_revenue"], 2)
         session_rows.append(row)
 
-    return {
+    tables = {
         "user_activity_summary": sorted(user_rows, key=lambda item: (item["event_date"], item["user_id"])),
         "product_popularity": sorted(product_rows, key=lambda item: (item["event_date"], item["product_id"])),
         "conversion_funnel": sorted(funnel_rows, key=lambda item: item["event_date"]),
@@ -206,6 +215,20 @@ def build_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
             session_rows,
             key=lambda item: (item["event_date"], item["user_id"] or -1, item["user_session"] or ""),
         ),
+    }
+    tables.update(build_phase4_gold_tables(silver_rows))
+    return tables
+
+
+def build_phase4_gold_tables(silver_rows: list[dict]) -> dict[str, list[dict]]:
+    """Build advanced Phase 4 Gold analytics with the canonical table schemas."""
+
+    return {
+        "cohort_retention": build_cohort_retention_table(silver_rows),
+        "repeat_purchase": build_repeat_purchase_table(silver_rows),
+        "product_affinity": build_product_affinity_table(silver_rows),
+        "time_to_conversion_distribution": build_time_to_conversion_distribution_table(silver_rows),
+        "rfm_segmentation": build_rfm_segmentation_table(silver_rows),
     }
 
 
@@ -229,6 +252,34 @@ def run_silver_to_gold(
         silver_rows.extend(read_jsonl(jsonl_file))
 
     tables = build_gold_tables(silver_rows)
+    dq_report = validate_gold_tables_for_publication(tables)
+    if not dq_report.passed:
+        manifest = RunManifest(
+            stage=stage_name,
+            run_id=run_id,
+            status="failed",
+            inputs=[str(silver_root)],
+            outputs=[],
+            metrics={"rows_read": len(silver_rows), **dq_report.to_metrics()},
+            details={"failure": "gold_dq_gate"},
+        )
+        manifest_path = write_manifest(config.manifest_root, manifest)
+        emit_pipeline_metrics(
+            stage_name,
+            run_id,
+            {**dq_report.to_metrics(), "rows_read": len(silver_rows), "tables_written": 0},
+            details={"manifest": str(manifest_path)},
+        )
+        if DQ_FAIL_ON_ERROR:
+            raise RuntimeError("Gold publication blocked by data quality checks.")
+        return GoldAggregationResult(
+            run_id=run_id,
+            rows_read=len(silver_rows),
+            output_paths=[],
+            manifest_path=manifest_path,
+            dq_report=dq_report,
+        )
+
     output_paths: list[Path] = []
     for table_name, rows in tables.items():
         if not rows:
@@ -243,13 +294,24 @@ def run_silver_to_gold(
         status="succeeded",
         inputs=[str(silver_root)],
         outputs=[str(path) for path in output_paths],
-        metrics={"rows_read": len(silver_rows), "tables_written": len(output_paths)},
+        metrics={"rows_read": len(silver_rows), "tables_written": len(output_paths), **dq_report.to_metrics()},
     )
     manifest_path = write_manifest(config.manifest_root, manifest)
+    emit_pipeline_metrics(
+        stage_name,
+        run_id,
+        {
+            **dq_report.to_metrics(),
+            "rows_read": len(silver_rows),
+            "tables_written": len(output_paths),
+        },
+        details={"manifest": str(manifest_path)},
+    )
 
     return GoldAggregationResult(
         run_id=run_id,
         rows_read=len(silver_rows),
         output_paths=output_paths,
         manifest_path=manifest_path,
+        dq_report=dq_report,
     )

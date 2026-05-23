@@ -128,10 +128,11 @@ services:
     volumes:
       - spark_events:/opt/spark/events
       - spark_master_data:/opt/spark/work-dir
+      - ../data/raw:/workspace/data/raw:ro
       - ../data/sample:/workspace/data/sample:ro
       - ../infra/jobs:/workspace/jobs:ro
-    cpus: 0.75
-    mem_limit: 768m
+    cpus: 1.25
+    mem_limit: 2g
 
   spark-worker-1:
     <<: *service-defaults
@@ -153,6 +154,7 @@ services:
       - "8082:8081"
     volumes:
       - spark_worker1_data:/opt/spark/work-dir
+      - ../data/raw:/workspace/data/raw:ro
       - ../data/sample:/workspace/data/sample:ro
     tmpfs:
       - /tmp:size=256m
@@ -179,6 +181,7 @@ services:
       - "8083:8081"
     volumes:
       - spark_worker2_data:/opt/spark/work-dir
+      - ../data/raw:/workspace/data/raw:ro
       - ../data/sample:/workspace/data/sample:ro
     tmpfs:
       - /tmp:size=256m

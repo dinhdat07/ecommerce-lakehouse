@@ -1,0 +1,81 @@
+services:
+  trino:
+    container_name: server-trino
+    image: trinodb/trino:480
+    restart: unless-stopped
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ../trino/etc:/etc/trino:ro
+    mem_limit: 1536m
+
+  superset-init:
+    container_name: server-superset-init
+    image: apache/superset:4.1.2
+    network_mode: host
+    restart: "no"
+    depends_on:
+      - trino
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SUPERSET_SECRET_KEY: changeme-insecure-dev-key
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      PYTHONPATH: /app/pythonpath
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@127.0.0.1:5432/superset
+      SUPERSET_TRINO_SQLALCHEMY_URI: trino://trino@127.0.0.1:8085/iceberg/demo
+    volumes:
+      - superset_home_server:/app/superset_home
+      - ../../superset/pythonpath:/app/pythonpath:ro
+      - ../../superset/bootstrap:/app/bootstrap:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pip install --no-cache-dir trino sqlalchemy-trino psycopg2-binary >/tmp/superset-pip.log 2>&1
+        until python -c "import socket; [(lambda s, hp: (s.settimeout(2), s.connect(hp), s.close()))(socket.socket(), hp) for hp in [('127.0.0.1', 5432), ('127.0.0.1', 8085)]]" >/dev/null 2>&1
+        do
+          sleep 2
+        done
+        superset db upgrade
+        superset fab create-admin \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --email admin@example.com \
+          --password admin || true
+        superset init
+        python /app/bootstrap/bootstrap_superset.py
+        echo "Superset bootstrap complete."
+
+  superset:
+    container_name: server-superset
+    image: apache/superset:4.1.2
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - superset-init
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SUPERSET_SECRET_KEY: changeme-insecure-dev-key
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      PYTHONPATH: /app/pythonpath
+      SUPERSET_LOAD_EXAMPLES: "no"
+      SUPERSET_SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://superset:superset@127.0.0.1:5432/superset
+      SUPERSET_TRINO_SQLALCHEMY_URI: trino://trino@127.0.0.1:8085/iceberg/demo
+    volumes:
+      - superset_home_server:/app/superset_home
+      - ../../superset/pythonpath:/app/pythonpath:ro
+      - ../../superset/bootstrap:/app/bootstrap:ro
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        pip install --no-cache-dir trino sqlalchemy-trino psycopg2-binary >/tmp/superset-pip.log 2>&1
+        superset run -h 0.0.0.0 -p 8088 --with-threads
+
+volumes:
+  superset_home_server:

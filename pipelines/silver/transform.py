@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common.config import AppConfig
+from common.constants import DQ_FAIL_ON_ERROR
+from common.dq_checks import DQReport, validate_silver_rows_for_publication
 from common.manifests import RunManifest, write_manifest
+from common.pipeline_metrics import emit_pipeline_metrics
 from common.quality import (
     build_event_identity,
     coerce_float,
@@ -37,6 +40,7 @@ class SilverTransformResult:
     output_paths: list[Path]
     quarantine_path: Path
     manifest_path: Path
+    dq_report: DQReport | None = None
 
 
 def canonicalize_record(bronze_record: dict) -> tuple[dict | None, dict | None]:
@@ -123,6 +127,45 @@ def run_bronze_to_silver(
             seen_keys.add(dedupe_key)
             valid_by_date.setdefault(canonical["event_date"], []).append(canonical)
 
+    flat_valid = [row for rows in valid_by_date.values() for row in rows]
+    dq_report = validate_silver_rows_for_publication(flat_valid)
+    if not dq_report.passed:
+        quarantine_path = silver_root / "_quarantine" / f"run_id={run_id}" / "records.jsonl"
+        invalid_rows = write_jsonl(quarantine_path, quarantine_rows)
+        manifest = RunManifest(
+            stage=stage_name,
+            run_id=run_id,
+            status="failed",
+            inputs=[str(bronze_root)],
+            outputs=[str(quarantine_path)],
+            metrics={
+                "valid_rows": 0,
+                "invalid_rows": invalid_rows,
+                "duplicate_rows": duplicate_rows,
+                **dq_report.to_metrics(),
+            },
+            details={"failure": "silver_dq_gate"},
+        )
+        manifest_path = write_manifest(config.manifest_root, manifest)
+        emit_pipeline_metrics(
+            stage_name,
+            run_id,
+            {**dq_report.to_metrics(), "valid_rows": 0, "invalid_rows": invalid_rows, "duplicate_rows": duplicate_rows},
+            details={"manifest": str(manifest_path)},
+        )
+        if DQ_FAIL_ON_ERROR:
+            raise RuntimeError("Silver publication blocked by data quality checks.")
+        return SilverTransformResult(
+            run_id=run_id,
+            valid_rows=0,
+            invalid_rows=invalid_rows,
+            duplicate_rows=duplicate_rows,
+            output_paths=[],
+            quarantine_path=quarantine_path,
+            manifest_path=manifest_path,
+            dq_report=dq_report,
+        )
+
     output_paths: list[Path] = []
     valid_rows = 0
     for event_date, rows in sorted(valid_by_date.items()):
@@ -143,9 +186,21 @@ def run_bronze_to_silver(
             "valid_rows": valid_rows,
             "invalid_rows": invalid_rows,
             "duplicate_rows": duplicate_rows,
+            **dq_report.to_metrics(),
         },
     )
     manifest_path = write_manifest(config.manifest_root, manifest)
+    emit_pipeline_metrics(
+        stage_name,
+        run_id,
+        {
+            **dq_report.to_metrics(),
+            "valid_rows": valid_rows,
+            "invalid_rows": invalid_rows,
+            "duplicate_rows": duplicate_rows,
+        },
+        details={"manifest": str(manifest_path)},
+    )
 
     return SilverTransformResult(
         run_id=run_id,
@@ -155,4 +210,5 @@ def run_bronze_to_silver(
         output_paths=output_paths,
         quarantine_path=quarantine_path,
         manifest_path=manifest_path,
+        dq_report=dq_report,
     )

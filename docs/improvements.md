@@ -3,13 +3,13 @@
 ## Visible Layer
 
 - The repository now exposes working batch and streaming-friendly CLIs, Gold outputs, and serving SQL, but dashboards are still represented as contracts rather than exported Superset objects.
-- Gold outputs are local CSV files for portability. A production follow-up should materialize these as Iceberg tables and expose them through Trino directly.
+- Benchmark outputs are JSON and CSV files today. A production follow-up could push benchmark history into a queryable audit table or time-series store.
 
 ## Hidden Layer
 
 - Add a dedicated invalid-record table separate from Silver quarantine so data-quality metrics can be queried historically.
-- Introduce compaction and retention policies. JSONL and CSV are practical for local validation, but object-store deployments need small-file control and lifecycle rules.
-- Persist watermarks and replay offsets for the local streaming bus so reruns can be incremental instead of full micro-batch recomputations.
+- Introduce compaction and retention policies for Iceberg data and metadata files.
+- Persist streaming watermarks and replay offsets in a queryable audit layer so reruns can be incremental and easier to debug.
 - Add reconciliation checks between Bronze row counts, Silver valid/invalid counts, and Gold aggregate totals to catch silent data drift.
 - Promote run manifests into a queryable audit table for lineage, SLA tracking, and incident response.
 

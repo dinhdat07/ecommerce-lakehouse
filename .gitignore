@@ -6,6 +6,12 @@ __pycache__/
 .venv/
 venv/
 
+# Chatbot
+chatbot/backend/data/
+chatbot/frontend/node_modules/
+chatbot/frontend/dist/
+*.tsbuildinfo
+
 # Environment
 .env
 
@@ -30,6 +36,42 @@ logs/
 Thumbs.db
 .idea/
 .vscode/
-
+.cursorignore
 
 AGENTS.md
+
+# Build artifacts
+ecommerce_lakehouse.egg-info/
+*.egg-info/
+
+# Binary documents
+*.docx
+
+# Hardcoded config (use .template instead)
+infra/server/trino/catalog/iceberg.properties
+infra/server/trino/etc/catalog/iceberg.properties
+
+# Server/local environment files with secrets
+infra/server/env/*.env
+infra/server/env/*.env.baseline
+infra/server/env/*.env.optimized
+*.env
+.env
+.env.baseline
+.env.optimized
+
+# Database files
+*.sqlite3
+*.sqlite
+*.db
+
+# Log files outside logs/ directory
+*.log
+
+# Editor swap/backup files
+*.swp
+*.swo
+*.bak
+*.backup
+*.orig
+*~

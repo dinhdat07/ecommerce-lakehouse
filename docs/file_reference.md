@@ -21,12 +21,21 @@ This document summarizes the important added or modified files, their roles, and
   - Main items:
     - `RunManifest`: structured metadata for one run.
     - `write_manifest()`: writes the manifest JSON to disk.
+- `common/observability.py`
+  - Role: shared wrapper for stage manifests and structured `pipeline_metrics` events.
+  - Main items:
+    - `stage_timer()`: starts wall-clock timing for a stage.
+    - `stage_elapsed_seconds()`: converts a stage timer into seconds.
+    - `record_stage_event()`: writes the manifest and emits the matching metrics payload.
 - `common/storage.py`
   - Role: simple JSONL and CSV persistence layer used by the local backend.
   - Main items: `write_jsonl()`, `append_jsonl()`, `read_jsonl()`, `iter_jsonl_files()`, `write_csv()`.
 - `common/quality.py`
   - Role: hidden-layer data quality and normalization helpers.
   - Main items: `parse_event_timestamp()`, `normalize_nullable_text()`, `coerce_int()`, `coerce_float()`, `build_event_identity()`, `derive_event_date()`.
+- `common/dq_checks.py`
+  - Role: shared DQ rule definitions for local publication gates.
+  - Main items: `DQRuleResult`, `DQReport`, `validate_silver_rows_for_publication()`, `validate_gold_tables_for_publication()`.
 
 ## Pipeline Modules
 
@@ -62,15 +71,19 @@ This document summarizes the important added or modified files, their roles, and
   - Role: operator CLI for batch Gold aggregation.
   - Main function: `main()` runs the shared Gold stage and logs written tables.
 - `apps/producer/replay_csv_to_kafka.py`
-  - Role: replay sample CSV rows to Kafka or a local fallback bus.
-  - Main items: `default_input_csv()`, `iter_csv_rows()`, `_write_local_bus()`, `main()`.
+  - Role: replay bounded sample CSV rows to Kafka with batch pacing suitable for laptop demos.
+  - Main items:
+    - `default_input_csv()`: selects the preferred sample file for replay.
+    - `derive_source_month()`: infers `YYYY-MM` from `event_time`.
+    - `build_message()`: wraps each CSV row in the replay envelope consumed by Spark.
+    - `send_with_console_producer()`: fallback Kafka sender using the containerized console producer.
+    - `main()`: runs the bounded replay.
 - `apps/streaming/kafka_to_bronze.py`
-  - Role: consume the local fallback bus and feed Bronze ingestion.
-  - Main items: `build_spark_session()` for future backend compatibility and `main()` for the local path.
+  - Role: legacy local fallback entrypoint retained for non-Docker development.
 - `apps/streaming/bronze_to_silver_stream.py`
-  - Role: streaming-friendly Silver entrypoint reusing the same transformation core.
+  - Role: legacy local fallback Silver entrypoint retained for non-Docker development.
 - `apps/streaming/silver_to_gold_stream.py`
-  - Role: streaming-friendly Gold entrypoint reusing the same aggregation core.
+  - Role: legacy local fallback Gold entrypoint retained for non-Docker development.
 - `scripts/run_local_batch.sh`
   - Role: simple sample-data batch run.
 - `scripts/run_local_streaming.sh`
@@ -108,15 +121,60 @@ This document summarizes the important added or modified files, their roles, and
   - Role: stop the compose stack without deleting persistent volumes.
 - `infra/scripts/purge.sh`
   - Role: remove the compose stack, its volumes, and its service images to reclaim disk space.
-- `apps/sql/trino_gold_views.sql`
-  - Role: serving-layer SQL view definitions aligned with Gold contracts.
-
+- `infra/jobs/batch_backfill_to_iceberg.py`
+  - Role: Phase 1 Spark job that materializes Bronze, Silver, and Gold as physical Iceberg tables from historical CSV inputs.
+  - Main items:
+    - `build_silver_base_rows()`: normalizes Bronze rows before deduplication and DQ.
+    - `deduplicate_silver_candidates()`: derives rerun-safe Silver candidates.
+    - `process_bronze_batch()`: runs Bronze, Silver, and Gold with stage manifests and metrics.
+- `infra/jobs/kafka_stream_to_iceberg.py`
+  - Role: Phase 2 Spark Structured Streaming job that consumes Kafka replay events and incrementally refreshes Bronze, Silver, and Gold.
+  - Main items:
+    - `parse_replay_messages()`: parses Kafka JSON envelopes into typed rows.
+    - `process_microbatch()`: projects the Bronze micro-batch and reuses the shared Phase 1 transformation logic.
+    - `main()`: runs the bounded streaming query with configurable timeout and checkpointing.
+- `infra/jobs/dq_iceberg.py`
+  - Role: Spark-side DQ summaries for Silver and Gold publication.
+  - Main items:
+    - `summarize_silver_dataframe_quality()`: returns counts, rules, and bad-record samples for Silver.
+    - `summarize_gold_dataframe_quality()`: returns counts, rules, and bad-record samples for Gold tables.
+- `infra/jobs/benchmark_system_lakehouse_vs_parquet.py`
+  - Role: Phase 3 system benchmark for Spark + Iceberg vs Spark + Parquet.
+  - Main items:
+    - `_resolve_input_dataset()`: selects full or demo benchmark input.
+    - `_run_parquet_baseline()`: writes the Parquet benchmark outputs with the same Spark transforms and DQ checks.
+    - `_run_iceberg_lakehouse()`: runs the Iceberg benchmark path and captures stage metrics.
+- `infra/jobs/benchmark_batch_vs_streaming.py`
+  - Role: Phase 3 processing-model benchmark for one-shot batch vs bounded microbatch replay.
+  - Main items:
+    - `_run_batch_path()`: measures the single-pass batch path.
+    - `_run_streaming_path()`: measures bounded microbatch replay with the same incremental pipeline logic.
+- `infra/jobs/benchmark_input_samples.py`
+  - Role: shared benchmark input sample bootstrapper and resolver.
+  - Main items:
+    - `resolve_sample_dataset()`: selects or bootstraps benchmark input samples from S3 or local CSV.
+    - `bootstrap_sample_dataset()`: writes partitioned sample datasets to S3 for repeatable benchmark runs.
+- `infra/jobs/iceberg_maintenance_report.py`
+  - Role: inspect Iceberg table snapshots, file counts, and orphan files.
+  - Main items: used by `infra/server/scripts/plan-iceberg-maintenance.sh` for maintenance planning.
+- `infra/scripts/run-streaming-demo.sh`
+  - Role: bounded orchestration for the laptop-safe Phase 2 demo.
+  - Main steps: generate March-April sample data, start the required Compose profiles, recreate the Kafka topic, launch the Spark streaming job, replay the sample to Kafka, and wait for the bounded query to finish.
+- `infra/scripts/run-phase3-benchmarks.sh`
+  - Role: Docker wrapper for the Phase 3 system and processing-model benchmarks.
 ## Documentation
 
 - `README.md`: repository overview and quick start.
-- `docs/gap_analysis.md`: current implementation status and remaining gaps.
-- `docs/local_setup.md`: local environment, sample data, and test instructions.
-- `docs/docker_laptop_stack.md`: laptop-friendly compose architecture, usage, and cleanup guidance.
-- `docs/multi_node_readiness.md`: current scaling posture and migration path.
-- `docs/deployment_3node_ubuntu.md`: step-by-step 3-server deployment guide.
+- `docs/architecture.md`: visible and hidden system architecture.
+- `docs/pipeline.md`: Bronze, Silver, Gold contracts and refresh models.
+- `docs/deployment.md`: step-by-step 3-node Ubuntu deployment guide.
+- `docs/local_docker.md`: laptop-friendly compose architecture, usage, and cleanup.
+- `docs/development.md`: local dev environment, sample data, and test instructions.
+- `docs/operations.md`: stage metrics, manifests, DQ rules, reset, and recovery.
+- `docs/demo_guide.md`: demo showcase walkthrough.
+- `docs/benchmarking.md`: benchmark modes, commands, output files, and interpretation.
+- `docs/benchmark_profile.md`: 2-month benchmark profile report.
+- `docs/chatbot_architecture.md`: chatbot system design.
+- `docs/file_reference.md`: file roles and key classes/functions.
 - `docs/improvements.md`: limitations and recommended next improvements.
+- `docs/references.md`: curated bibliography and source-quality notes.

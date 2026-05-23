@@ -35,6 +35,18 @@ require_running() {
   fi
 }
 
+DEMO_SAMPLE_ROWS="${DEMO_SAMPLE_ROWS:-100000}"
+DEMO_SOURCE_MONTH="${DEMO_SOURCE_MONTH:-2020-04}"
+DEMO_SAMPLE_FILE="${DEMO_SAMPLE_FILE:-data/sample/events_demo_${DEMO_SAMPLE_ROWS}.csv}"
+DEMO_REGENERATE="${DEMO_REGENERATE:-0}"
+DEMO_RESET_TABLES="${DEMO_RESET_TABLES:-1}"
+
+if [[ ! -f "${DEMO_SAMPLE_FILE}" || "${DEMO_REGENERATE}" == "1" ]]; then
+  python3 scripts/create_sample.py --rows "${DEMO_SAMPLE_ROWS}" --output "${DEMO_SAMPLE_FILE}"
+fi
+
+DEMO_SAMPLE_CONTAINER_PATH="/workspace/${DEMO_SAMPLE_FILE#./}"
+
 full_compose up -d
 
 wait_for_http "http://localhost:8080/v1/info" "Trino"
@@ -45,9 +57,17 @@ require_running trino
 require_running superset
 
 docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
+  --master local[2] \
+  --driver-memory 1400m \
   --conf spark.jars.ivy=/tmp/.ivy2 \
   --conf spark.io.compression.codec=lzf \
+  --conf spark.shuffle.compress=false \
+  --conf spark.shuffle.spill.compress=false \
+  --conf spark.broadcast.compress=false \
+  --conf spark.sql.adaptive.enabled=false \
+  --conf spark.sql.shuffle.partitions=8 \
+  --conf spark.sql.session.timeZone=UTC \
+  --conf spark.local.dir=/opt/spark/work-dir/spark-local \
   --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,org.apache.iceberg:iceberg-aws-bundle:1.6.1,org.postgresql:postgresql:42.7.3 \
   --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
   --conf spark.sql.defaultCatalog=lakehouse \
@@ -64,11 +84,17 @@ docker exec "$(profiled_service_cid spark-master)" /opt/spark/bin/spark-submit \
   --conf spark.sql.catalog.lakehouse.s3.secret-access-key=minioadmin \
   --conf spark.sql.catalog.lakehouse.s3.path-style-access=true \
   --conf spark.sql.catalog.lakehouse.client.region=us-east-1 \
-  /workspace/jobs/load_sample_to_iceberg.py
+  /workspace/jobs/batch_backfill_to_iceberg.py \
+  --input-file "${DEMO_SAMPLE_CONTAINER_PATH}" \
+  --source-month "${DEMO_SOURCE_MONTH}" \
+  --start-month "${DEMO_SOURCE_MONTH}" \
+  --end-month "${DEMO_SOURCE_MONTH}" \
+  $( [[ "${DEMO_RESET_TABLES}" == "1" ]] && printf '%s' "--reset-tables" )
 
-docker exec -i "$(profiled_service_cid trino)" trino < "${ROOT_DIR}/infra/trino/sql/prepare_demo_views.sql"
-docker exec "$(profiled_service_cid superset)" python /app/bootstrap/bootstrap_superset.py
+bash "${SCRIPT_DIR}/bootstrap-superset.sh"
 
 echo "E2E demo prepared."
+echo "Sample file: ${DEMO_SAMPLE_FILE}"
+echo "Sample rows target: ${DEMO_SAMPLE_ROWS}"
 echo "Superset URL: http://localhost:8088"
 echo "Dashboard URL: http://localhost:8088/superset/dashboard/lakehouse-sample-dashboard/"
