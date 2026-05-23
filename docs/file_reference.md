@@ -149,6 +149,14 @@ This document summarizes the important added or modified files, their roles, and
   - Main items:
     - `_run_batch_path()`: measures the single-pass batch path.
     - `_run_streaming_path()`: measures bounded microbatch replay with the same incremental pipeline logic.
+- `infra/jobs/benchmark_input_samples.py`
+  - Role: shared benchmark input sample bootstrapper and resolver.
+  - Main items:
+    - `resolve_sample_dataset()`: selects or bootstraps benchmark input samples from S3 or local CSV.
+    - `bootstrap_sample_dataset()`: writes partitioned sample datasets to S3 for repeatable benchmark runs.
+- `infra/jobs/iceberg_maintenance_report.py`
+  - Role: inspect Iceberg table snapshots, file counts, and orphan files.
+  - Main items: used by `infra/server/scripts/plan-iceberg-maintenance.sh` for maintenance planning.
 - `infra/scripts/run-streaming-demo.sh`
   - Role: bounded orchestration for the laptop-safe Phase 2 demo.
   - Main steps: generate March-April sample data, start the required Compose profiles, recreate the Kafka topic, launch the Spark streaming job, replay the sample to Kafka, and wait for the bounded query to finish.

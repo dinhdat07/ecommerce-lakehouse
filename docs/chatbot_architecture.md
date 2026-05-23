@@ -166,6 +166,10 @@ Later:
 
 ## Suggested Folder Layout
 
+The layout below reflects the original design. In the current implementation, LLM
+prompts are inlined in `chat_service.py` rather than stored in a separate
+`prompts/` directory.
+
 ```text
 chatbot/
   backend/
@@ -173,7 +177,6 @@ chatbot/
       api/
       core/
       llm/
-      prompts/
       services/
       sql/
     tests/
@@ -187,7 +190,6 @@ chatbot/
     README.md
   shared/
     semantic/
-    prompts/
 ```
 
 ## Suggested MVP
