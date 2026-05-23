@@ -55,6 +55,26 @@ stream_running() {
   pid_is_running "$(stream_pid_file)"
 }
 
+stream_app_active() {
+  python3 - <<'PY'
+import json
+import urllib.request
+
+url = "http://127.0.0.1:8080/json/"
+try:
+    payload = json.load(urllib.request.urlopen(url, timeout=5))
+except Exception:
+    raise SystemExit(1)
+
+for app in payload.get("activeapps", []):
+    name = str(app.get("name", ""))
+    if name.endswith("-streaming"):
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
 ensure_streaming() {
   if stream_running; then
     log "Streaming already running with pid $(cat "$(stream_pid_file)")"
@@ -64,6 +84,24 @@ ensure_streaming() {
   bash "${SCRIPT_DIR}/start-streaming.sh"
   sleep 5
   stream_running || fail "streaming job did not start"
+  local ready=0
+  local log_file="${STREAM_LOG_FILE:-${SERVER_RUNTIME_DIR}/streaming/${STREAM_QUERY_NAME}.log}"
+  for _ in $(seq 1 24); do
+    if stream_app_active; then
+      ready=1
+      break
+    fi
+    if [[ -n "${STREAM_PROGRESS_LOG_PATH}" ]] && [[ -f "${STREAM_PROGRESS_LOG_PATH}" ]] && grep -q '"batchId"' "${STREAM_PROGRESS_LOG_PATH}"; then
+      ready=1
+      break
+    fi
+    if [[ -f "${log_file}" ]] && [[ -s "${log_file}" ]]; then
+      ready=1
+      break
+    fi
+    sleep 5
+  done
+  (( ready == 1 )) || fail "streaming job started but did not become observable in Spark UI/logs in time"
 }
 
 show_status() {

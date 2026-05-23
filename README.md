@@ -158,6 +158,7 @@ BENCH_MODE=full BENCH_INPUT_DIR=/workspace/data/raw bash infra/scripts/run-phase
 ## Key Documentation
 
 - `docs/architecture.md`: visible and hidden system architecture
+- `docs/references.md`: curated bibliography and source-quality notes
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts
 - `docs/pipeline.md`: Bronze, Silver, Gold contracts and bounded Phase 2 refresh model
 - `docs/gap_analysis.md`: current implementation status and remaining gaps

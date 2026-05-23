@@ -60,7 +60,7 @@
       "grain": "One row per cohort_month and period_offset.",
       "key_columns": ["cohort_month", "period_offset"],
       "dimensions": ["cohort_month", "period_offset"],
-      "metrics": ["retention_rate", "retained_users", "cohort_size"],
+      "metrics": ["retention_rate", "active_users", "cohort_users"],
       "examples": ["Cohort retention matrix", "Retention over time"]
     },
     {
@@ -78,25 +78,25 @@
       "grain": "One row per product_a and product_b pair.",
       "key_columns": ["product_a", "product_b"],
       "dimensions": ["product_a", "product_b"],
-      "metrics": ["affinity_lift", "co_purchase_count"],
+      "metrics": ["affinity_lift", "co_purchase_sessions"],
       "examples": ["Cross-sell pairs", "Affinity matrix"]
     },
     {
       "name": "time_to_conversion_distribution",
       "description": "Distribution of time-to-conversion buckets.",
-      "grain": "One row per time_bucket.",
-      "key_columns": ["time_bucket"],
-      "dimensions": ["time_bucket"],
+      "grain": "One row per event_date and time_bucket.",
+      "key_columns": ["event_date", "time_bucket"],
+      "dimensions": ["event_date", "time_bucket"],
       "metrics": ["conversions"],
       "examples": ["Conversion latency distribution"]
     },
     {
       "name": "rfm_segmentation",
       "description": "Customer segments derived from recency, frequency, and monetary scores.",
-      "grain": "One row per user_id.",
-      "key_columns": ["user_id"],
-      "dimensions": ["rfm_segment"],
-      "metrics": ["recency_score", "frequency_score", "monetary_score"],
+      "grain": "One row per user_id as of a snapshot date.",
+      "key_columns": ["as_of_date", "user_id"],
+      "dimensions": ["as_of_date", "rfm_segment"],
+      "metrics": ["recency_days", "frequency_90d", "monetary_90d", "r_score", "f_score", "m_score"],
       "examples": ["Segment mix", "High-value customer segments"]
     }
   ],

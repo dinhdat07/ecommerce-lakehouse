@@ -18,8 +18,31 @@ if [[ -n "${STREAM_PROGRESS_LOG_PATH}" ]]; then
   mkdir -p "$(dirname "${STREAM_PROGRESS_LOG_PATH}")"
 fi
 
+active_streaming_apps() {
+  python3 - <<'PY'
+import json
+import sys
+import urllib.request
+
+url = "http://127.0.0.1:8080/json/"
+try:
+    payload = json.load(urllib.request.urlopen(url, timeout=5))
+except Exception:
+    raise SystemExit(0)
+
+for app in payload.get("activeapps", []):
+    name = str(app.get("name", ""))
+    if name.endswith("-streaming"):
+        print(app.get("id", ""))
+PY
+}
+
 if pid_is_running "${STREAM_PID_FILE}"; then
   fail "streaming job already running with pid $(cat "${STREAM_PID_FILE}")"
+fi
+
+if [[ -n "$(active_streaming_apps)" ]]; then
+  fail "a Spark streaming application is already active; run stop-streaming.sh first"
 fi
 
 if [[ "${STREAM_GOLD_MODE}" == "full" ]]; then

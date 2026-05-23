@@ -59,6 +59,10 @@ def _missing_columns(df: DataFrame, required_columns: tuple[str, ...]) -> list[s
     return [column for column in required_columns if column not in present]
 
 
+def _int_or_zero(value: Any) -> int:
+    return 0 if value is None else int(value)
+
+
 def summarize_silver_dataframe_quality(
     silver_base_rows: DataFrame,
     silver_publish_rows: DataFrame,
@@ -84,9 +88,9 @@ def summarize_silver_dataframe_quality(
             )
             .collect()[0]
         )
-    base_count = int(base_row["base_count"])
-    valid_pre_dedupe = int(base_row["valid_pre_dedupe"])
-    invalid_timestamp = int(base_row["invalid_timestamp"])
+    base_count = _int_or_zero(base_row["base_count"])
+    valid_pre_dedupe = _int_or_zero(base_row["valid_pre_dedupe"])
+    invalid_timestamp = _int_or_zero(base_row["invalid_timestamp"])
 
     with bm.timed_action(silver_publish_rows.sparkSession, f"{stage}_dq_publish_counts", phase="dq"):
         publish_row = (
@@ -108,12 +112,12 @@ def summarize_silver_dataframe_quality(
             )
             .collect()[0]
         )
-    publish_count = int(publish_row["publish_count"])
-    invalid_event_type = int(publish_row["invalid_event_type"])
-    null_event_time = int(publish_row["null_event_time"])
-    null_event_date = int(publish_row["null_event_date"])
-    null_event_type = int(publish_row["null_event_type"])
-    bad_purchase_price = int(publish_row["bad_purchase_price"])
+    publish_count = _int_or_zero(publish_row["publish_count"])
+    invalid_event_type = _int_or_zero(publish_row["invalid_event_type"])
+    null_event_time = _int_or_zero(publish_row["null_event_time"])
+    null_event_date = _int_or_zero(publish_row["null_event_date"])
+    null_event_type = _int_or_zero(publish_row["null_event_type"])
+    bad_purchase_price = _int_or_zero(publish_row["bad_purchase_price"])
     duplicate_rows = max(valid_pre_dedupe - publish_count, 0)
 
     metrics = {
@@ -250,9 +254,9 @@ def summarize_gold_dataframe_quality(
         else:
             agg_exprs.append(F.lit(0).alias("negative_rows"))
         agg_row = working_df.agg(*agg_exprs).collect()[0]
-    row_count = int(agg_row["row_count"])
-    null_event_date = int(agg_row["null_event_date"])
-    negative_rows = int(agg_row["negative_rows"])
+    row_count = _int_or_zero(agg_row["row_count"])
+    null_event_date = _int_or_zero(agg_row["null_event_date"])
+    negative_rows = _int_or_zero(agg_row["negative_rows"])
 
     metrics = {
         f"{stage}_{name}_rows_to_publish": row_count,

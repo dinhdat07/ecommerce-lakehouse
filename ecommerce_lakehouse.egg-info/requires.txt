@@ -1,8 +1,0 @@
-
-[dev]
-pytest>=8.0
-ruff>=0.4
-
-[platform]
-pyspark>=3.5
-kafka-python>=2.0
